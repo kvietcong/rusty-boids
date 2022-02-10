@@ -13,14 +13,14 @@ struct Speed(f32);
 #[derive(Component, Clone, Copy, Debug)]
 struct Vision(f32);
 
-const WIDTH: f32 = 1920.0;
-const HEIGHT: f32 = 1080.0;
+const WIDTH: f32 = 1600.0;
+const HEIGHT: f32 = 900.0;
 
 const VISION_RANGE: f32 = 75.0;
-const SPEED: f32 = 150.0;
+const SPEED: f32 = 200.0;
 
-const COHESION_FACTOR: f32 = 1.50;
-const ALIGNMENT_FACTOR: f32 = 1.00;
+const COHESION_FACTOR: f32 = 1.00;
+const ALIGNMENT_FACTOR: f32 = 2.00;
 const SEPARATION_FACTOR: f32 = 2.50;
 
 fn add_boids(mut commands: Commands) {
@@ -35,7 +35,6 @@ fn add_boids(mut commands: Commands) {
         let speed = Speed(SPEED);
         commands
             .spawn()
-            // The "draw" component
             .insert_bundle(SpriteBundle {
                 sprite: Sprite {
                     color: Color::WHITE,
@@ -49,13 +48,9 @@ fn add_boids(mut commands: Commands) {
                 },
                 ..SpriteBundle::default()
             })
-            // Tag to indicate Boid
             .insert(Boid(format!("Boid {}", i)))
-            // Movement Direction
             .insert(direction)
-            // Vision Radius
             .insert(vision)
-            // Movement Speed
             .insert(speed);
     }
 }
@@ -163,6 +158,7 @@ fn cohesion_system(
         }
 
         if count > 0 {
+            average_position /= count as f32;
             let direction = Vec2::new(
                 average_position.x - pos_a.translation.x,
                 average_position.y - pos_a.translation.y,
