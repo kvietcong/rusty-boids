@@ -19,11 +19,11 @@ const HEIGHT: f32 = 900.0;
 const IS_MODULAR: bool = false; // true makes the program slower
 const IS_DEBUGGING: bool = false;
 
-const BOIDS: usize = 150;
+const BOIDS: usize = 1000;
 
-const VISION_RANGE: f32 = 100.0;
-const SPEED: f32 = 150.0;
-const SIZE: f32 = 15.0;
+const VISION_RANGE: f32 = 40.0;
+const SPEED: f32 = 75.0;
+const SIZE: f32 = 10.0;
 
 const COHESION_FACTOR: f32 = 1.00;
 const ALIGNMENT_FACTOR: f32 = 1.50;
