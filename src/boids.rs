@@ -219,12 +219,11 @@ fn chase_system(
 
 fn apply_force(
     force: Vec2,
-    factor: f32,
-    delta_time: f32,
+    lerp_amount: f32,
     creature: Result<(Entity, Mut<Direction>, &Transform, &Sprite), QueryEntityError>,
 ) {
-    if let Ok((_, mut dir, _, _)) = creature {
-        dir.0 = dir.0.lerp(force, factor * delta_time).normalize();
+    if let Ok((_, mut direction, _, _)) = creature {
+        direction.0 = direction.0.lerp(force, lerp_amount).normalize();
     }
 }
 
@@ -238,37 +237,16 @@ fn boid_flocking_system(
     let (cohesion_forces, alignment_forces, separation_forces, collision_avoidance_forces) =
         calculate_flocking_forces(boids, boid_factors.vision);
     let delta_time = timer.delta_seconds();
-    for (id, force) in cohesion_forces {
-        apply_force(
-            force,
-            boid_factors.cohesion,
-            delta_time,
-            boid_query.get_mut(id),
-        );
-    }
-    for (id, force) in alignment_forces {
-        apply_force(
-            force,
-            boid_factors.alignment,
-            delta_time,
-            boid_query.get_mut(id),
-        );
-    }
-    for (id, force) in separation_forces {
-        apply_force(
-            force,
-            boid_factors.separation,
-            delta_time,
-            boid_query.get_mut(id),
-        );
-    }
-    for (id, force) in collision_avoidance_forces {
-        apply_force(
-            force,
-            boid_factors.collision_avoidance,
-            delta_time,
-            boid_query.get_mut(id),
-        );
+    let all_forces = [
+        (cohesion_forces, boid_factors.cohesion),
+        (alignment_forces, boid_factors.alignment),
+        (separation_forces, boid_factors.separation),
+        (collision_avoidance_forces, boid_factors.collision_avoidance),
+    ];
+    for (forces, factor) in all_forces {
+        for (id, force) in forces {
+            apply_force(force, factor * delta_time, boid_query.get_mut(id));
+        }
     }
 }
 
@@ -282,37 +260,19 @@ fn chaser_flocking_system(
     let (cohesion_forces, alignment_forces, separation_forces, collision_avoidance_forces) =
         calculate_flocking_forces(chasers, chaser_factors.vision);
     let delta_time = timer.delta_seconds();
-    for (id, force) in cohesion_forces {
-        apply_force(
-            force,
-            chaser_factors.cohesion,
-            delta_time,
-            chaser_query.get_mut(id),
-        );
-    }
-    for (id, force) in alignment_forces {
-        apply_force(
-            force,
-            chaser_factors.alignment,
-            delta_time,
-            chaser_query.get_mut(id),
-        );
-    }
-    for (id, force) in separation_forces {
-        apply_force(
-            force,
-            chaser_factors.separation,
-            delta_time,
-            chaser_query.get_mut(id),
-        );
-    }
-    for (id, force) in collision_avoidance_forces {
-        apply_force(
-            force,
+    let all_forces = [
+        (cohesion_forces, chaser_factors.cohesion),
+        (alignment_forces, chaser_factors.alignment),
+        (separation_forces, chaser_factors.separation),
+        (
+            collision_avoidance_forces,
             chaser_factors.collision_avoidance,
-            delta_time,
-            chaser_query.get_mut(id),
-        );
+        ),
+    ];
+    for (forces, factor) in all_forces {
+        for (id, force) in forces {
+            apply_force(force, factor * delta_time, chaser_query.get_mut(id));
+        }
     }
 }
 
