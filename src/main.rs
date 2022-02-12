@@ -1,19 +1,21 @@
-use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, diagnostic::LogDiagnosticsPlugin, prelude::*};
+use bevy::{
+    diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
+    ecs::query::QueryEntityError,
+    prelude::*,
+};
 use rand::prelude::*;
-use std::collections::HashMap;
+use std::time::Duration;
 
 #[derive(Component, Clone, Debug, PartialEq)]
 struct Direction(Vec2);
 
-#[derive(Component, Clone, Debug, PartialEq, Eq)]
-enum CreatureType {
-    Boid,
-    Chaser,
-}
+#[derive(Component, Clone, Debug, PartialEq)]
+struct Boid;
 
 #[derive(Component, Clone, Debug, PartialEq)]
-struct Speed(f32);
+struct Chaser;
 
+#[derive(Clone, Debug, PartialEq)]
 struct BoidFactors {
     color: Color,
     speed: f32,
@@ -26,6 +28,7 @@ struct BoidFactors {
     scare: f32,
 }
 
+#[derive(Clone, Debug, PartialEq)]
 struct ChaserFactors {
     color: Color,
     speed: f32,
@@ -40,9 +43,6 @@ struct ChaserFactors {
 
 const WIDTH: f32 = 1600.0;
 const HEIGHT: f32 = 900.0;
-
-const IS_MODULAR: bool = false; // true makes the program slower
-const IS_DEBUGGING: bool = true;
 
 const BOIDS: usize = 1000;
 const CHASERS: usize = BOIDS / 100;
@@ -60,7 +60,7 @@ fn setup_window(mut windows: ResMut<Windows>) {
 fn spawn_creature(
     rng: &mut ThreadRng,
     commands: &mut Commands,
-    creature_type: CreatureType,
+    creature_type: &str,
     boid_factors: &BoidFactors,
     chaser_factors: &ChaserFactors,
 ) {
@@ -70,20 +70,17 @@ fn spawn_creature(
         Vec2::new(rng.gen::<f32>() * 2.0 - 1.0, rng.gen::<f32>() * 2.0 - 1.0).normalize(),
     );
     let color: Color;
-    let speed: Speed;
     let size: Vec2;
     let mut creature_commands = commands.spawn();
 
-    if creature_type == CreatureType::Boid {
+    if creature_type == "boid" {
+        creature_commands.insert(Boid);
         color = boid_factors.color;
         size = boid_factors.size;
-        speed = Speed(boid_factors.speed);
-        creature_commands.insert(creature_type);
-    } else if creature_type == CreatureType::Chaser {
+    } else if creature_type == "chaser" {
+        creature_commands.insert(Chaser);
         color = chaser_factors.color;
         size = chaser_factors.size;
-        speed = Speed(chaser_factors.speed);
-        creature_commands.insert(creature_type);
     } else {
         panic!("Unknown creature type: {:?}", creature_type);
     }
@@ -102,38 +99,46 @@ fn spawn_creature(
             },
             ..SpriteBundle::default()
         })
-        .insert(direction)
-        .insert(speed);
+        .insert(direction);
 }
 
-fn add_boids(
+fn setup_creatures(
     mut commands: Commands,
     boid_factors: Res<BoidFactors>,
-    chaser_factors: Res<ChaserFactors>
+    chaser_factors: Res<ChaserFactors>,
 ) {
     let mut rng = rand::thread_rng();
     for _ in 1..=BOIDS {
         spawn_creature(
-            &mut rng, &mut commands, CreatureType::Boid,
-            boid_factors.as_ref(), chaser_factors.as_ref());
+            &mut rng,
+            &mut commands,
+            "boid",
+            boid_factors.as_ref(),
+            chaser_factors.as_ref(),
+        );
     }
     for _ in 1..=CHASERS {
         spawn_creature(
-            &mut rng, &mut commands, CreatureType::Chaser,
-            boid_factors.as_ref(), chaser_factors.as_ref());
+            &mut rng,
+            &mut commands,
+            "chaser",
+            boid_factors.as_ref(),
+            chaser_factors.as_ref(),
+        );
     }
 }
 
-fn move_creatures_system(
-    mut query: Query<(&mut Transform, &Direction, &CreatureType)>,
+fn move_system(
+    mut query: Query<(&mut Transform, &Direction, Option<&Boid>, Option<&Chaser>)>,
     chaser_factors: Res<ChaserFactors>,
     boid_factors: Res<BoidFactors>,
-    timer: Res<Time>
+    timer: Res<Time>,
 ) {
-    for (mut transform, direction, c_type) in query.iter_mut() {
-        let speed = match c_type {
-            CreatureType::Boid => boid_factors.speed,
-            CreatureType::Chaser => chaser_factors.speed,
+    for (mut transform, direction, boid_opt, chaser_opt) in query.iter_mut() {
+        let speed = match (boid_opt, chaser_opt) {
+            (Some(_), None) => boid_factors.speed,
+            (None, Some(_)) => chaser_factors.speed,
+            _ => 0.0,
         };
         transform.translation.x += direction.0.x * speed * timer.delta_seconds();
         transform.translation.y += direction.0.y * speed * timer.delta_seconds();
@@ -141,7 +146,7 @@ fn move_creatures_system(
     }
 }
 
-fn border_system(mut query: Query<&mut Transform>, windows: ResMut<Windows>) {
+fn wrap_borders_system(mut query: Query<&mut Transform>, windows: ResMut<Windows>) {
     let window = windows.get_primary().unwrap();
     let width = window.width();
     let height = window.height();
@@ -160,48 +165,21 @@ fn border_system(mut query: Query<&mut Transform>, windows: ResMut<Windows>) {
 }
 
 fn scare_system(
-    mut query: Query<(&mut Direction, &Transform, &CreatureType)>,
-    chaser_factors: Res<ChaserFactors>,
+    mut boids: Query<(&mut Direction, &Transform), With<Boid>>,
+    chasers: Query<&Transform, With<Chaser>>,
     boid_factors: Res<BoidFactors>,
     timer: Res<Time>,
 ) {
-    let mut combos = query.iter_combinations_mut();
-    while let Some([(mut dir_a, trans_a, type_a), (mut dir_b, trans_b, type_b)]) =
-        combos.fetch_next()
-    {
-        if type_a == type_b {
-            continue;
-        }
-        if *type_a == CreatureType::Boid {
+    for (mut direction, trans_a) in boids.iter_mut() {
+        for trans_b in chasers.iter() {
             let distance = trans_a.translation.distance(trans_b.translation);
-            let vision = match type_a {
-                CreatureType::Boid => boid_factors.vision,
-                CreatureType::Chaser => chaser_factors.vision,
-            };
-            if distance < vision {
+            if distance < boid_factors.vision {
                 let run_direction = Vec2::new(
                     trans_a.translation.x - trans_b.translation.x,
                     trans_a.translation.y - trans_b.translation.y,
                 )
                 .normalize();
-                dir_a.0 = dir_a
-                    .0
-                    .lerp(run_direction, boid_factors.scare * timer.delta_seconds());
-            }
-        }
-        if *type_b == CreatureType::Boid {
-            let distance = trans_b.translation.distance(trans_a.translation);
-            let vision = match type_b {
-                CreatureType::Boid => boid_factors.vision,
-                CreatureType::Chaser => chaser_factors.vision,
-            };
-            if distance < vision {
-                let run_direction = Vec2::new(
-                    trans_b.translation.x - trans_a.translation.x,
-                    trans_b.translation.y - trans_a.translation.y,
-                )
-                .normalize();
-                dir_b.0 = dir_b
+                direction.0 = direction
                     .0
                     .lerp(run_direction, boid_factors.scare * timer.delta_seconds());
             }
@@ -210,429 +188,260 @@ fn scare_system(
 }
 
 fn chase_system(
-    mut query: Query<(Entity, &mut Direction, &Transform, &CreatureType)>,
+    mut chasers: Query<(&mut Direction, &Transform), With<Chaser>>,
+    boids: Query<&Transform, With<Boid>>,
     chaser_factors: Res<ChaserFactors>,
-    boid_factors: Res<BoidFactors>,
     timer: Res<Time>,
 ) {
-    let mut targets = HashMap::new();
-    for (id_a, _, trans_a, type_a) in query.iter() {
-        for (id_b, _, trans_b, type_b) in query.iter() {
-            if id_a == id_b {
-                continue;
-            }
-            if *type_a == CreatureType::Chaser && *type_b == CreatureType::Boid {
-                let distance = trans_a.translation.distance(trans_b.translation);
-                let vision = match type_a {
-                    CreatureType::Boid => boid_factors.vision,
-                    CreatureType::Chaser => chaser_factors.vision,
-                };
-                if distance < vision {
-                    if let Some((old_distance, _)) = targets.get(&id_a) {
-                        if distance < *old_distance {
-                            let chase_direction = Vec2::new(
-                                trans_b.translation.x - trans_a.translation.x,
-                                trans_b.translation.y - trans_a.translation.y,
-                            )
-                            .normalize();
-                            targets.insert(id_a, (distance, Some(chase_direction)));
+    for (mut direction, trans_a) in chasers.iter_mut() {
+        let mut closest_target = (0.0, None);
+        for trans_b in boids.iter() {
+            let distance = trans_a.translation.distance(trans_b.translation);
+            if distance < chaser_factors.vision {
+                closest_target = match closest_target {
+                    (_, None) => (distance, Some(trans_b)),
+                    (old_distance, Some(_)) => {
+                        if old_distance > distance {
+                            (distance, Some(trans_b))
+                        } else {
+                            closest_target
                         }
-                    } else {
-                        targets.insert(id_a, (distance, None));
                     }
-                }
+                };
             }
         }
-    }
-
-    for (id, (_, some_chase_direction)) in targets {
-        if let Some(chase_direction) = some_chase_direction {
-            if let Ok((_, mut direction, _, _)) = query.get_mut(id) {
-                direction.0 = direction
-                    .0
-                    .lerp(chase_direction, chaser_factors.chase * timer.delta_seconds());
-            }
-        }
-    }
-}
-
-fn separation_system(
-    mut query: Query<(Entity, &mut Direction, &Transform, &CreatureType)>,
-    chaser_factors: Res<ChaserFactors>,
-    boid_factors: Res<BoidFactors>,
-    timer: Res<Time>,
-) {
-    let mut changes = vec![];
-
-    for (id_a, _dir_a, trans_a, type_a) in query.iter() {
-        let mut average_position = Vec2::ZERO;
-        let mut count = 0;
-
-        for (id_b, _dir_b, trans_b, _type_b) in query.iter() {
-            if id_a == id_b {
-                continue;
-            }
-            let vision = match type_a {
-                CreatureType::Boid => boid_factors.vision,
-                CreatureType::Chaser => chaser_factors.vision,
-            };
-            let distance = trans_a.translation.distance(trans_b.translation);
-            if distance < vision / 2.0 {
-                average_position += Vec2::new(trans_b.translation.x, trans_b.translation.y);
-                count += 1;
-            }
-        }
-
-        if count > 0 {
-            average_position /= count as f32;
-            let away_direction = Vec2::new(
-                trans_a.translation.x - average_position.x,
-                trans_a.translation.y - average_position.y,
+        if let (_, Some(closest_trans)) = closest_target {
+            let chase_direction = Vec2::new(
+                closest_trans.translation.x - trans_a.translation.x,
+                closest_trans.translation.y - trans_a.translation.y,
             )
             .normalize();
-            changes.push((id_a, away_direction));
-        }
-    }
-
-    for (id, away_direction) in changes {
-        if let Ok((_, mut dir, _, c_type)) = query.get_mut(id) {
-            let separation = match c_type {
-                CreatureType::Boid => boid_factors.separation,
-                CreatureType::Chaser => chaser_factors.separation,
-            };
-            dir.0 = dir
-                .0
-                .lerp(away_direction, separation * timer.delta_seconds())
-                .normalize();
+            direction.0 = direction.0.lerp(
+                chase_direction,
+                chaser_factors.chase * timer.delta_seconds(),
+            );
         }
     }
 }
 
-fn cohesion_system(
-    mut query: Query<(Entity, &mut Direction, &Transform, &CreatureType)>,
-    chase_factors: Res<ChaserFactors>,
-    boid_factors: Res<BoidFactors>,
-    timer: Res<Time>,
+fn apply_force(
+    force: Vec2,
+    factor: f32,
+    delta_time: f32,
+    creature: Result<(Entity, Mut<Direction>, &Transform, &Sprite), QueryEntityError>,
 ) {
-    let mut changes = vec![];
-
-    for (id_a, _dir_a, trans_a, type_a) in query.iter() {
-        let mut average_position = Vec2::ZERO;
-        let mut count = 0;
-
-        for (id_b, _dir_b, trans_b, _type_b) in query.iter() {
-            if id_a == id_b {
-                continue;
-            }
-            let vision = match type_a {
-                CreatureType::Boid => boid_factors.vision,
-                CreatureType::Chaser => chase_factors.vision,
-            };
-            let distance = trans_a.translation.distance(trans_b.translation);
-            if distance < vision {
-                average_position += Vec2::new(trans_b.translation.x, trans_b.translation.y);
-                count += 1;
-            }
-        }
-
-        if count > 0 {
-            average_position /= count as f32;
-            let center_direction = Vec2::new(
-                average_position.x - trans_a.translation.x,
-                average_position.y - trans_a.translation.y,
-            )
-            .normalize();
-            changes.push((id_a, center_direction));
-        }
-    }
-
-    for (id, center_direction) in changes {
-        if let Ok((_, mut dir, _, c_type)) = query.get_mut(id) {
-            let cohesion = match c_type {
-                CreatureType::Boid => boid_factors.cohesion,
-                CreatureType::Chaser => chase_factors.cohesion,
-            };
-            dir.0 = dir
-                .0
-                .lerp(center_direction, cohesion * timer.delta_seconds())
-                .normalize();
-        }
+    if let Ok((_, mut dir, _, _)) = creature {
+        dir.0 = dir.0.lerp(force, factor * delta_time).normalize();
     }
 }
 
-fn alignment_system(
-    mut query: Query<(Entity, &mut Direction, &Transform, &CreatureType)>,
-    chaser_factors: Res<ChaserFactors>,
+fn boid_flocking_system(
+    mut boid_query: Query<(Entity, &mut Direction, &Transform, &Sprite), With<Boid>>,
     boid_factors: Res<BoidFactors>,
     timer: Res<Time>,
 ) {
-    let mut changes = vec![];
-
-    for (id_a, _dir_a, trans_a, type_a) in query.iter() {
-        let mut average_direction = Vec2::ZERO;
-        let mut count = 0;
-
-        for (id_b, dir_b, trans_b, _type_b) in query.iter() {
-            if id_a == id_b {
-                continue;
-            }
-            let vision = match type_a {
-                CreatureType::Boid => boid_factors.vision,
-                CreatureType::Chaser => chaser_factors.vision,
-            };
-            let distance = trans_a.translation.distance(trans_b.translation);
-            if distance < vision {
-                average_direction += dir_b.0;
-                count += 1;
-            }
-        }
-
-        if count > 0 {
-            average_direction /= count as f32;
-            changes.push((id_a, average_direction));
-        }
-    }
-
-    for (id, average_direction) in changes {
-        if let Ok((_, mut dir, _, c_type)) = query.get_mut(id) {
-            let alignment = match c_type {
-                CreatureType::Boid => boid_factors.alignment,
-                CreatureType::Chaser => chaser_factors.alignment,
-            };
-            dir.0 = dir
-                .0
-                .lerp(average_direction, alignment * timer.delta_seconds())
-                .normalize();
-        }
-    }
-}
-
-fn collision_avoidance_system(
-    mut query: Query<(&mut Direction, &Transform, &CreatureType)>,
-    chaser_factors: Res<ChaserFactors>,
-    boid_factors: Res<BoidFactors>,
-    timer: Res<Time>,
-) {
-    let mut combos = query.iter_combinations_mut();
-    while let Some([(mut dir_a, trans_a, type_a), (mut dir_b, trans_b, type_b)]) = combos.fetch_next() {
-        let distance = trans_a.translation.distance(trans_b.translation);
-        let direction = Vec2::new(
-            trans_a.translation.x - trans_b.translation.x,
-            trans_a.translation.y - trans_b.translation.y,
+    let mut boids = vec![];
+    boid_query.iter().for_each(|boid| boids.push(boid));
+    let (cohesion_forces, alignment_forces, separation_forces, collision_avoidance_forces) =
+        calculate_flocking_forces(boids, boid_factors.vision);
+    let delta_time = timer.delta_seconds();
+    for (id, force) in cohesion_forces {
+        apply_force(
+            force,
+            boid_factors.cohesion,
+            delta_time,
+            boid_query.get_mut(id),
         );
-        let size = chaser_factors.size.x.max(boid_factors.size.x);
-        if distance < size {
-            dir_a.0 = dir_a.0.lerp(
-                direction,
-                if *type_a == CreatureType::Boid { boid_factors.collision_avoidance } else { chaser_factors.collision_avoidance } * timer.delta_seconds(),
-            );
-            dir_b.0 = dir_b.0.lerp(
-                -direction,
-                if *type_b == CreatureType::Boid { boid_factors.collision_avoidance } else { chaser_factors.collision_avoidance } * timer.delta_seconds(),
-            );
-        }
+    }
+    for (id, force) in alignment_forces {
+        apply_force(
+            force,
+            boid_factors.alignment,
+            delta_time,
+            boid_query.get_mut(id),
+        );
+    }
+    for (id, force) in separation_forces {
+        apply_force(
+            force,
+            boid_factors.separation,
+            delta_time,
+            boid_query.get_mut(id),
+        );
+    }
+    for (id, force) in collision_avoidance_forces {
+        apply_force(
+            force,
+            boid_factors.collision_avoidance,
+            delta_time,
+            boid_query.get_mut(id),
+        );
     }
 }
 
-// Does exhibit slightly different behavior than the modularized system.
-fn all_in_one_system(
-    mut query: Query<(Entity, &mut Direction, &Transform, &CreatureType)>,
+fn chaser_flocking_system(
+    mut chaser_query: Query<(Entity, &mut Direction, &Transform, &Sprite), With<Chaser>>,
     chaser_factors: Res<ChaserFactors>,
-    boid_factors: Res<BoidFactors>,
     timer: Res<Time>,
 ) {
-    let mut targets = HashMap::new();
-    let mut scare_forces = vec![];
+    let mut chasers = vec![];
+    chaser_query.iter().for_each(|chaser| chasers.push(chaser));
+    let (cohesion_forces, alignment_forces, separation_forces, collision_avoidance_forces) =
+        calculate_flocking_forces(chasers, chaser_factors.vision);
+    let delta_time = timer.delta_seconds();
+    for (id, force) in cohesion_forces {
+        apply_force(
+            force,
+            chaser_factors.cohesion,
+            delta_time,
+            chaser_query.get_mut(id),
+        );
+    }
+    for (id, force) in alignment_forces {
+        apply_force(
+            force,
+            chaser_factors.alignment,
+            delta_time,
+            chaser_query.get_mut(id),
+        );
+    }
+    for (id, force) in separation_forces {
+        apply_force(
+            force,
+            chaser_factors.separation,
+            delta_time,
+            chaser_query.get_mut(id),
+        );
+    }
+    for (id, force) in collision_avoidance_forces {
+        apply_force(
+            force,
+            chaser_factors.collision_avoidance,
+            delta_time,
+            chaser_query.get_mut(id),
+        );
+    }
+}
+
+fn calculate_flocking_forces(
+    creatures: Vec<(Entity, &Direction, &Transform, &Sprite)>,
+    vision: f32,
+) -> (
+    Vec<(Entity, Vec2)>,
+    Vec<(Entity, Vec2)>,
+    Vec<(Entity, Vec2)>,
+    Vec<(Entity, Vec2)>,
+) {
     let mut cohesion_forces = vec![];
     let mut alignment_forces = vec![];
     let mut separation_forces = vec![];
     let mut collision_avoidance_forces = vec![];
 
-    for (id_a, _dir_a, trans_a, type_a) in query.iter() {
+    for (id_a, _, trans_a, sprite_a) in creatures.iter() {
         let mut average_position = Vec2::ZERO;
         let mut average_direction = Vec2::ZERO;
-        let mut average_position_close = Vec2::ZERO;
+        let mut average_close_position = Vec2::ZERO;
+        let mut vision_count = 0;
+        let mut half_vision_count = 0;
 
-        let mut in_vision = 0;
-        let mut in_half_vision = 0;
-
-        for (id_b, dir_b, trans_b, type_b) in query.iter() {
+        for (id_b, dir_b, trans_b, _) in creatures.iter() {
             if id_a == id_b {
                 continue;
             }
             let distance = trans_a.translation.distance(trans_b.translation);
-            let size = match type_a {
-                CreatureType::Boid => boid_factors.size,
-                CreatureType::Chaser => chaser_factors.size,
-            };
-            let vision = match type_a {
-                CreatureType::Boid => boid_factors.vision,
-                CreatureType::Chaser => chaser_factors.vision,
-            };
-            if distance < size.x {
-                let away_direction = Vec2::new(
-                    trans_a.translation.x - trans_b.translation.x,
-                    trans_a.translation.y - trans_b.translation.y,
-                )
-                .normalize();
-                collision_avoidance_forces.push((id_a, away_direction));
-            }
             if distance < vision {
+                vision_count += 1;
                 average_position += Vec2::new(trans_b.translation.x, trans_b.translation.y);
                 average_direction += dir_b.0;
-                // Chase System
-                if *type_a == CreatureType::Chaser && *type_b == CreatureType::Boid {
-                    if let Some((old_distance, _)) = targets.get(&id_a) {
-                        if distance < *old_distance {
-                            let chase_direction = Vec2::new(
-                                trans_b.translation.x - trans_a.translation.x,
-                                trans_b.translation.y - trans_a.translation.y,
-                            )
-                            .normalize();
-                            targets.insert(id_a, (distance, Some(chase_direction)));
-                        }
-                    } else {
-                        targets.insert(id_a, (distance, None));
-                    }
-                }
-                // Scare System
-                if *type_a == CreatureType::Boid && *type_b == CreatureType::Chaser {
-                    if distance < vision {
-                        let run_direction = Vec2::new(
-                            trans_a.translation.x - trans_b.translation.x,
-                            trans_a.translation.y - trans_b.translation.y,
-                        )
-                        .normalize();
-                        scare_forces.push((id_a, run_direction));
-                    }
-                }
-                in_vision += 1;
             }
             if distance < vision / 2.0 {
-                average_position_close += Vec2::new(trans_b.translation.x, trans_b.translation.y);
-                in_half_vision += 1;
+                half_vision_count += 1;
+                average_close_position += Vec2::new(trans_b.translation.x, trans_b.translation.y);
+            }
+            if let Some(size) = sprite_a.custom_size {
+                if distance < size.x * 2.0 {
+                    let away_direction = Vec2::new(
+                        trans_a.translation.x - trans_b.translation.x,
+                        trans_a.translation.y - trans_b.translation.y,
+                    )
+                    .normalize();
+                    collision_avoidance_forces.push((*id_a, away_direction));
+                }
             }
         }
 
-        if in_half_vision > 0 {
-            average_position_close /= in_half_vision as f32;
-            let away_direction = Vec2::new(
-                trans_a.translation.x - average_position_close.x,
-                trans_a.translation.y - average_position_close.y,
-            )
-            .normalize();
-            separation_forces.push((id_a, away_direction));
-        }
-        if in_vision > 0 {
-            average_position /= in_vision as f32;
-            average_direction /= in_vision as f32;
-            let center_direction = Vec2::new(
+        if vision_count > 0 {
+            average_position /= vision_count as f32;
+            average_direction /= vision_count as f32;
+            let cohesion_force = Vec2::new(
                 average_position.x - trans_a.translation.x,
                 average_position.y - trans_a.translation.y,
             )
             .normalize();
-            cohesion_forces.push((id_a, center_direction));
-            alignment_forces.push((id_a, average_direction));
+            cohesion_forces.push((*id_a, cohesion_force));
+            alignment_forces.push((*id_a, average_direction.normalize()));
+        }
+        if half_vision_count > 0 {
+            average_close_position /= half_vision_count as f32;
+            let separation_force = Vec2::new(
+                trans_a.translation.x - average_close_position.x,
+                trans_a.translation.y - average_close_position.y,
+            )
+            .normalize();
+            separation_forces.push((*id_a, separation_force));
         }
     }
 
-    for (id, center_direction) in cohesion_forces {
-        if let Ok((_, mut dir, _, c_type)) = query.get_mut(id) {
-            let cohesion = match c_type {
-                CreatureType::Boid => boid_factors.cohesion,
-                CreatureType::Chaser => chaser_factors.cohesion,
-            };
-            dir.0 = dir
-                .0
-                .lerp(center_direction, cohesion * timer.delta_seconds())
-                .normalize();
+    return (
+        cohesion_forces,
+        alignment_forces,
+        separation_forces,
+        collision_avoidance_forces,
+    );
+}
+
+fn update_factors_system(
+    mut chaser_query: Query<&mut Sprite, (With<Chaser>, Without<Boid>)>,
+    mut boid_query: Query<&mut Sprite, (With<Boid>, Without<Chaser>)>,
+    chaser_factors: Res<ChaserFactors>,
+    boid_factors: Res<BoidFactors>,
+) {
+    if chaser_factors.is_changed() {
+        for mut sprite in chaser_query.iter_mut() {
+            sprite.color = chaser_factors.color;
+            sprite.custom_size = Some(chaser_factors.size);
         }
     }
-
-    for (id, away_direction) in separation_forces {
-        if let Ok((_, mut dir, _, c_type)) = query.get_mut(id) {
-            let separation = match c_type {
-                CreatureType::Boid => boid_factors.separation,
-                CreatureType::Chaser => chaser_factors.separation,
-            };
-            dir.0 = dir
-                .0
-                .lerp(away_direction, separation * timer.delta_seconds())
-                .normalize();
-        }
-    }
-
-    for (id, average_direction) in alignment_forces {
-        if let Ok((_, mut dir, _, c_type)) = query.get_mut(id) {
-            let alignment = match c_type {
-                CreatureType::Boid => boid_factors.alignment,
-                CreatureType::Chaser => chaser_factors.alignment,
-            };
-            dir.0 = dir
-                .0
-                .lerp(average_direction, alignment * timer.delta_seconds())
-                .normalize();
-        }
-    }
-
-    for (id, run_direction) in scare_forces {
-        if let Ok((_, mut dir, _, _)) = query.get_mut(id) {
-            dir.0 = dir
-                .0
-                .lerp(run_direction, boid_factors.scare * timer.delta_seconds())
-                .normalize();
-        }
-    }
-
-    for (id, away_direction) in collision_avoidance_forces {
-        if let Ok((_, mut dir, _, c_type)) = query.get_mut(id) {
-            let collision_avoidance = match c_type {
-                CreatureType::Boid => boid_factors.collision_avoidance,
-                CreatureType::Chaser => chaser_factors.collision_avoidance,
-            };
-            dir.0 = dir
-                .0
-                .lerp(
-                    away_direction,
-                    collision_avoidance * timer.delta_seconds(),
-                )
-                .normalize();
-        }
-    }
-
-    for (id, (_, some_chase_direction)) in targets {
-        if let Some(chase_direction) = some_chase_direction {
-            if let Ok((_, mut direction, _, _)) = query.get_mut(id) {
-                direction.0 = direction
-                    .0
-                    .lerp(chase_direction, chaser_factors.chase * timer.delta_seconds());
-            }
+    if boid_factors.is_changed() {
+        for mut sprite in boid_query.iter_mut() {
+            sprite.color = boid_factors.color;
+            sprite.custom_size = Some(boid_factors.size);
         }
     }
 }
 
 fn main() {
-    let boid_factors = BoidFactors {
+    let initial_boid_factors = BoidFactors {
         color: Color::WHITE,
         speed: 75.0,
-        vision: 50.0,
-        size: Vec2::new(10.0, 3.0),
+        vision: 30.0,
+        size: Vec2::new(10.0, 2.0),
         cohesion: 1.00,
-        separation: 1.50,
+        separation: 1.00,
         alignment: 3.00,
-        collision_avoidance: 1.0,
+        collision_avoidance: 4.0,
         scare: 10.0,
     };
 
-    let chaser_factors = ChaserFactors {
+    let initial_chaser_factors = ChaserFactors {
         color: Color::RED,
         speed: 70.0,
-        vision: 70.0,
+        vision: 50.0,
         size: Vec2::new(16.0, 4.0),
         cohesion: 1.00,
         separation: 1.50,
         alignment: 3.00,
-        collision_avoidance: 1.0,
+        collision_avoidance: 3.0,
         chase: 5.0,
     };
 
@@ -640,8 +449,8 @@ fn main() {
 
     // Resources and plugins
     app.add_plugins(DefaultPlugins)
-        .insert_resource(boid_factors)
-        .insert_resource(chaser_factors)
+        .insert_resource(initial_boid_factors)
+        .insert_resource(initial_chaser_factors)
         .insert_resource(ClearColor(Color::rgb(0.0, 0.0, 0.0)))
         .insert_resource(WindowDescriptor {
             title: "Bevy - Le Boids".to_string(),
@@ -651,34 +460,27 @@ fn main() {
         }); // For some reason, this doesn't do anything
 
     // Startup Things
-    app.add_startup_system(add_boids)
+    app.add_startup_system(setup_creatures)
         .add_startup_system(setup_camera)
-        .add_startup_system(setup_window); // IDK Why the window doesn't resize with the descriptor
+        .add_startup_system(setup_window); // IDK Why the window doesn't resize with the descriptor above
 
     // Systems
-    app.add_system(move_creatures_system)
-        .add_system(border_system);
-    if IS_MODULAR {
-        // Creature System Split into parts
-        app.add_system(alignment_system)
-            .add_system(cohesion_system)
-            .add_system(separation_system)
-            .add_system(scare_system)
-            .add_system(chase_system)
-            .add_system(collision_avoidance_system);
-    } else {
-        // Creature System Compacted (Better Performance)
-        app.add_system(all_in_one_system);
-    } // The two systems behave slightly differently
+    app.add_system(move_system)
+        .add_system(wrap_borders_system)
+        .add_system(scare_system)
+        .add_system(chase_system)
+        .add_system(boid_flocking_system)
+        .add_system(chaser_flocking_system)
+        .add_system(update_factors_system);
 
-    if IS_DEBUGGING {
-        app.add_plugin(LogDiagnosticsPlugin::default())
-            .add_plugin(FrameTimeDiagnosticsPlugin::default());
-    }
+    app.add_plugin(FrameTimeDiagnosticsPlugin::default())
+        .add_plugin(LogDiagnosticsPlugin {
+            wait_duration: Duration::from_secs(2),
+            ..Default::default()
+        });
 
     app.run();
 }
 
 // TODO:
-// - Fix major differences in collision avoidance between all in one and modules
 // - Make live-adjustable factors
