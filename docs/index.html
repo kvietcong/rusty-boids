@@ -6,7 +6,51 @@
     <link rel="icon" href="./favicon.ico" type="image/x-icon">
 
     <script src="./rusty-boids.js"></script>
-    <script>wasm_bindgen("./rusty-boids_bg.wasm")</script>
+    <script>
+        wasm_bindgen("./rusty-boids_bg.wasm") // Initiate Simulation
+
+        const afterSimAppears = () => {
+            const container = document.getElementsByTagName("main")[0];
+            console.log(container)
+
+            const description = document.createElement("p");
+            description.innerHTML = `
+                This simulation was made with <a href=\"https://www.rust-lang.org/\">Rust</a>,
+                <a href=\"https://webassembly.org/\">WebAssembly</a>, and the
+                <a href=\"https://bevyengine.org/\">Bevy Game Engine</a>`;
+            container.appendChild(description);
+
+            const simulation = document.getElementsByTagName("canvas")[0];
+            document.body.removeChild(simulation);
+            container.appendChild(simulation);
+        };
+
+        const intervalID = setInterval(() => {
+            // Detect when Simulation has loaded
+            if (document.getElementsByTagName("canvas").length !== 0) {
+                clearInterval(intervalID);
+                afterSimAppears();
+            }
+        }, 500);
+    </script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        main {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+    </style>
 </head>
-<body></body>
+<body>
+    <main>
+        <h1>Welcome to KV Le's Boids (Flocking) Simulation</h1>
+    </main>
+</body>
 </html>
