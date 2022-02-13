@@ -9,5 +9,5 @@ impl Default for UiPlugin {
 }
 
 impl Plugin for UiPlugin {
-    fn build(&self, app: &mut App) {}
+    fn build(&self, _app: &mut App) {}
 }

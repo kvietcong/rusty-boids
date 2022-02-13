@@ -4,6 +4,12 @@ use rand::prelude::*;
 pub const BOIDS: usize = 1000;
 pub const CHASERS: usize = BOIDS / 100;
 
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub enum SimState {
+    Running,
+    Paused,
+}
+
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct BoidFactors {
     color: Color,
@@ -15,6 +21,18 @@ pub struct BoidFactors {
     alignment: f32,
     collision_avoidance: f32,
     scare: f32,
+}
+
+impl BoidFactors {
+    fn to_flocking_factors(&self) -> FlockingFactors {
+        FlockingFactors {
+            vision: self.vision,
+            cohesion: self.cohesion,
+            alignment: self.alignment,
+            separation: self.separation,
+            collision_avoidance: self.collision_avoidance,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Copy)]
@@ -30,32 +48,24 @@ pub struct ChaserFactors {
     chase: f32,
 }
 
+impl ChaserFactors {
+    fn to_flocking_factors(&self) -> FlockingFactors {
+        FlockingFactors {
+            vision: self.vision,
+            cohesion: self.cohesion,
+            alignment: self.alignment,
+            separation: self.separation,
+            collision_avoidance: self.collision_avoidance,
+        }
+    }
+}
+
 struct FlockingFactors {
     vision: f32,
     cohesion: f32,
     alignment: f32,
     separation: f32,
     collision_avoidance: f32,
-}
-
-fn from_boid_factors(factors: &BoidFactors) -> FlockingFactors {
-    FlockingFactors {
-        vision: factors.vision,
-        cohesion: factors.cohesion,
-        alignment: factors.alignment,
-        separation: factors.separation,
-        collision_avoidance: factors.collision_avoidance,
-    }
-}
-
-fn from_chaser_factors(factors: &ChaserFactors) -> FlockingFactors {
-    FlockingFactors {
-        vision: factors.vision,
-        cohesion: factors.cohesion,
-        alignment: factors.alignment,
-        separation: factors.separation,
-        collision_avoidance: factors.collision_avoidance,
-    }
 }
 
 #[derive(Component, Clone, Debug, PartialEq)]
@@ -79,8 +89,8 @@ fn spawn_creature(
     rng: &mut ThreadRng,
     commands: &mut Commands,
     creature_type: &str,
-    boid_factors: &BoidFactors,
-    chaser_factors: &ChaserFactors,
+    boid_factors: BoidFactors,
+    chaser_factors: ChaserFactors,
     screen_width: f32,
     screen_height: f32,
 ) {
@@ -138,8 +148,8 @@ fn setup_creatures(
             &mut rng,
             &mut commands,
             "boid",
-            boid_factors.as_ref(),
-            chaser_factors.as_ref(),
+            *boid_factors,
+            *chaser_factors,
             screen_width,
             screen_height,
         );
@@ -149,8 +159,8 @@ fn setup_creatures(
             &mut rng,
             &mut commands,
             "chaser",
-            boid_factors.as_ref(),
-            chaser_factors.as_ref(),
+            *boid_factors,
+            *chaser_factors,
             screen_width,
             screen_height,
         );
@@ -266,7 +276,7 @@ fn boid_flocking_system(
     send_flocking_forces(
         apply_force_event_handler,
         boids,
-        from_boid_factors(boid_factors.as_ref()),
+        boid_factors.to_flocking_factors(),
     );
 }
 
@@ -280,7 +290,7 @@ fn chaser_flocking_system(
     send_flocking_forces(
         apply_force_event_handler,
         chasers,
-        from_chaser_factors(chaser_factors.as_ref()),
+        chaser_factors.to_flocking_factors(),
     );
 }
 
@@ -393,6 +403,17 @@ fn apply_force_event_system(
     }
 }
 
+fn handle_input_system(keys: Res<Input<KeyCode>>, mut sim_state: ResMut<State<SimState>>) {
+    if keys.just_pressed(KeyCode::P) {
+        let current_sim_state = sim_state.current();
+        let new_sim_state = match current_sim_state {
+            SimState::Paused => SimState::Running,
+            SimState::Running => SimState::Paused,
+        };
+        sim_state.set(new_sim_state).unwrap();
+    }
+}
+
 pub struct BoidsPlugin {
     initial_boid_factors: BoidFactors,
     initial_chaser_factors: ChaserFactors,
@@ -409,7 +430,7 @@ impl Default for BoidsPlugin {
                 cohesion: 1.00,
                 separation: 1.00,
                 alignment: 3.00,
-                collision_avoidance: 4.0,
+                collision_avoidance: 3.5,
                 scare: 10.0,
             },
             initial_chaser_factors: ChaserFactors {
@@ -420,7 +441,7 @@ impl Default for BoidsPlugin {
                 cohesion: 3.00,
                 separation: 1.50,
                 alignment: 3.00,
-                collision_avoidance: 3.0,
+                collision_avoidance: 2.0,
                 chase: 5.0,
             },
         }
@@ -432,33 +453,38 @@ impl Plugin for BoidsPlugin {
         // Insert Resources
         app.insert_resource(self.initial_boid_factors)
             .insert_resource(self.initial_chaser_factors)
-            .add_event::<ApplyForceEvent>();
+            .add_event::<ApplyForceEvent>()
+            .add_state(SimState::Running);
 
         // Start up
         app.add_startup_system(setup_creatures);
 
-        app.add_system(move_system)
-            .add_system(wrap_borders_system)
-            .add_system(update_factors_system);
+        app.add_system(wrap_borders_system)
+            .add_system(update_factors_system)
+            .add_system(handle_input_system);
+
+        app.add_system_set(SystemSet::on_update(SimState::Running).with_system(move_system));
 
         app.add_system_set(
-            SystemSet::new()
+            SystemSet::on_update(SimState::Running)
                 .label("flocking")
+                .label("force_adding")
                 .with_system(boid_flocking_system)
                 .with_system(chaser_flocking_system),
         );
 
         app.add_system_set(
-            SystemSet::new()
+            SystemSet::on_update(SimState::Running)
                 .label("interactions")
+                .label("force_adding")
                 .with_system(scare_system)
                 .with_system(chase_system),
         );
 
-        app.add_system(
-            apply_force_event_system
-                .after("flocking")
-                .after("interactions"),
+        app.add_system_set(
+            SystemSet::on_update(SimState::Running)
+                .with_system(apply_force_event_system)
+                .after("force_adding"),
         );
     }
 }
