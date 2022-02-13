@@ -1,4 +1,4 @@
-use bevy::{ecs::query::QueryEntityError, prelude::*};
+use bevy::prelude::*;
 use rand::prelude::*;
 
 pub const BOIDS: usize = 1000;
@@ -30,14 +30,50 @@ pub struct ChaserFactors {
     chase: f32,
 }
 
+struct FlockingFactors {
+    vision: f32,
+    cohesion: f32,
+    alignment: f32,
+    separation: f32,
+    collision_avoidance: f32,
+}
+
+fn from_boid_factors(factors: &BoidFactors) -> FlockingFactors {
+    FlockingFactors {
+        vision: factors.vision,
+        cohesion: factors.cohesion,
+        alignment: factors.alignment,
+        separation: factors.separation,
+        collision_avoidance: factors.collision_avoidance,
+    }
+}
+
+fn from_chaser_factors(factors: &ChaserFactors) -> FlockingFactors {
+    FlockingFactors {
+        vision: factors.vision,
+        cohesion: factors.cohesion,
+        alignment: factors.alignment,
+        separation: factors.separation,
+        collision_avoidance: factors.collision_avoidance,
+    }
+}
+
 #[derive(Component, Clone, Debug, PartialEq)]
 struct Direction(Vec2);
+
+impl Direction {
+    fn lerp(&mut self, other: Vec2, t: f32) {
+        self.0 = self.0.lerp(other, t).normalize();
+    }
+}
 
 #[derive(Component, Clone, Debug, PartialEq)]
 struct Boid;
 
 #[derive(Component, Clone, Debug, PartialEq)]
 struct Chaser;
+
+struct ApplyForceEvent(Entity, Vec2, f32);
 
 fn spawn_creature(
     rng: &mut ThreadRng,
@@ -158,12 +194,12 @@ fn wrap_borders_system(mut query: Query<&mut Transform>, windows: ResMut<Windows
 }
 
 fn scare_system(
-    mut boids: Query<(&mut Direction, &Transform), With<Boid>>,
+    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+    boids: Query<(Entity, &Transform), With<Boid>>,
     chasers: Query<&Transform, With<Chaser>>,
     boid_factors: Res<BoidFactors>,
-    timer: Res<Time>,
 ) {
-    for (mut direction, trans_a) in boids.iter_mut() {
+    for (id, trans_a) in boids.iter() {
         for trans_b in chasers.iter() {
             let distance = trans_a.translation.distance(trans_b.translation);
             if distance < boid_factors.vision {
@@ -172,21 +208,23 @@ fn scare_system(
                     trans_a.translation.y - trans_b.translation.y,
                 )
                 .normalize();
-                direction.0 = direction
-                    .0
-                    .lerp(run_direction, boid_factors.scare * timer.delta_seconds());
+                apply_force_event_handler.send(ApplyForceEvent(
+                    id,
+                    run_direction,
+                    boid_factors.scare,
+                ));
             }
         }
     }
 }
 
 fn chase_system(
-    mut chasers: Query<(&mut Direction, &Transform), With<Chaser>>,
+    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+    chasers: Query<(Entity, &Transform), With<Chaser>>,
     boids: Query<&Transform, With<Boid>>,
     chaser_factors: Res<ChaserFactors>,
-    timer: Res<Time>,
 ) {
-    for (mut direction, trans_a) in chasers.iter_mut() {
+    for (id, trans_a) in chasers.iter() {
         let mut closest_target = (0.0, None);
         for trans_b in boids.iter() {
             let distance = trans_a.translation.distance(trans_b.translation);
@@ -209,87 +247,55 @@ fn chase_system(
                 closest_trans.translation.y - trans_a.translation.y,
             )
             .normalize();
-            direction.0 = direction.0.lerp(
+            apply_force_event_handler.send(ApplyForceEvent(
+                id,
                 chase_direction,
-                chaser_factors.chase * timer.delta_seconds(),
-            );
+                chaser_factors.chase,
+            ));
         }
-    }
-}
-
-fn apply_force(
-    force: Vec2,
-    lerp_amount: f32,
-    creature: Result<(Entity, Mut<Direction>, &Transform, &Sprite), QueryEntityError>,
-) {
-    if let Ok((_, mut direction, _, _)) = creature {
-        direction.0 = direction.0.lerp(force, lerp_amount).normalize();
     }
 }
 
 fn boid_flocking_system(
-    mut boid_query: Query<(Entity, &mut Direction, &Transform, &Sprite), With<Boid>>,
+    boid_query: Query<(Entity, &Direction, &Transform, &Sprite), With<Boid>>,
+    apply_force_event_handler: EventWriter<ApplyForceEvent>,
     boid_factors: Res<BoidFactors>,
-    timer: Res<Time>,
 ) {
     let mut boids = vec![];
     boid_query.iter().for_each(|boid| boids.push(boid));
-    let (cohesion_forces, alignment_forces, separation_forces, collision_avoidance_forces) =
-        calculate_flocking_forces(boids, boid_factors.vision);
-    let delta_time = timer.delta_seconds();
-    let all_forces = [
-        (cohesion_forces, boid_factors.cohesion),
-        (alignment_forces, boid_factors.alignment),
-        (separation_forces, boid_factors.separation),
-        (collision_avoidance_forces, boid_factors.collision_avoidance),
-    ];
-    for (forces, factor) in all_forces {
-        for (id, force) in forces {
-            apply_force(force, factor * delta_time, boid_query.get_mut(id));
-        }
-    }
+    send_flocking_forces(
+        apply_force_event_handler,
+        boids,
+        from_boid_factors(boid_factors.as_ref()),
+    );
 }
 
 fn chaser_flocking_system(
-    mut chaser_query: Query<(Entity, &mut Direction, &Transform, &Sprite), With<Chaser>>,
+    chaser_query: Query<(Entity, &Direction, &Transform, &Sprite), With<Chaser>>,
+    apply_force_event_handler: EventWriter<ApplyForceEvent>,
     chaser_factors: Res<ChaserFactors>,
-    timer: Res<Time>,
 ) {
     let mut chasers = vec![];
     chaser_query.iter().for_each(|chaser| chasers.push(chaser));
-    let (cohesion_forces, alignment_forces, separation_forces, collision_avoidance_forces) =
-        calculate_flocking_forces(chasers, chaser_factors.vision);
-    let delta_time = timer.delta_seconds();
-    let all_forces = [
-        (cohesion_forces, chaser_factors.cohesion),
-        (alignment_forces, chaser_factors.alignment),
-        (separation_forces, chaser_factors.separation),
-        (
-            collision_avoidance_forces,
-            chaser_factors.collision_avoidance,
-        ),
-    ];
-    for (forces, factor) in all_forces {
-        for (id, force) in forces {
-            apply_force(force, factor * delta_time, chaser_query.get_mut(id));
-        }
-    }
+    send_flocking_forces(
+        apply_force_event_handler,
+        chasers,
+        from_chaser_factors(chaser_factors.as_ref()),
+    );
 }
 
-fn calculate_flocking_forces(
+fn send_flocking_forces(
+    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
     creatures: Vec<(Entity, &Direction, &Transform, &Sprite)>,
-    vision: f32,
-) -> (
-    Vec<(Entity, Vec2)>,
-    Vec<(Entity, Vec2)>,
-    Vec<(Entity, Vec2)>,
-    Vec<(Entity, Vec2)>,
+    factors: FlockingFactors,
 ) {
-    let mut cohesion_forces = vec![];
-    let mut alignment_forces = vec![];
-    let mut separation_forces = vec![];
-    let mut collision_avoidance_forces = vec![];
-
+    let FlockingFactors {
+        vision,
+        cohesion,
+        alignment,
+        separation,
+        collision_avoidance,
+    } = factors;
     for (id_a, _, trans_a, sprite_a) in creatures.iter() {
         let mut average_position = Vec2::ZERO;
         let mut average_direction = Vec2::ZERO;
@@ -318,7 +324,11 @@ fn calculate_flocking_forces(
                         trans_a.translation.y - trans_b.translation.y,
                     )
                     .normalize();
-                    collision_avoidance_forces.push((*id_a, away_direction));
+                    apply_force_event_handler.send(ApplyForceEvent(
+                        *id_a,
+                        away_direction,
+                        collision_avoidance,
+                    ));
                 }
             }
         }
@@ -331,8 +341,12 @@ fn calculate_flocking_forces(
                 average_position.y - trans_a.translation.y,
             )
             .normalize();
-            cohesion_forces.push((*id_a, cohesion_force));
-            alignment_forces.push((*id_a, average_direction.normalize()));
+            apply_force_event_handler.send(ApplyForceEvent(*id_a, cohesion_force, cohesion));
+            apply_force_event_handler.send(ApplyForceEvent(
+                *id_a,
+                average_direction.normalize(),
+                alignment,
+            ));
         }
         if half_vision_count > 0 {
             average_close_position /= half_vision_count as f32;
@@ -341,16 +355,9 @@ fn calculate_flocking_forces(
                 trans_a.translation.y - average_close_position.y,
             )
             .normalize();
-            separation_forces.push((*id_a, separation_force));
+            apply_force_event_handler.send(ApplyForceEvent(*id_a, separation_force, separation));
         }
     }
-
-    return (
-        cohesion_forces,
-        alignment_forces,
-        separation_forces,
-        collision_avoidance_forces,
-    );
 }
 
 fn update_factors_system(
@@ -359,16 +366,29 @@ fn update_factors_system(
     chaser_factors: Res<ChaserFactors>,
     boid_factors: Res<BoidFactors>,
 ) {
+    if boid_factors.is_changed() {
+        for mut sprite in boid_query.iter_mut() {
+            sprite.color = boid_factors.color;
+            sprite.custom_size = Some(boid_factors.size);
+        }
+    }
     if chaser_factors.is_changed() {
         for mut sprite in chaser_query.iter_mut() {
             sprite.color = chaser_factors.color;
             sprite.custom_size = Some(chaser_factors.size);
         }
     }
-    if boid_factors.is_changed() {
-        for mut sprite in boid_query.iter_mut() {
-            sprite.color = boid_factors.color;
-            sprite.custom_size = Some(boid_factors.size);
+}
+
+fn apply_force_event_system(
+    mut apply_force_event_handler: EventReader<ApplyForceEvent>,
+    mut creature_query: Query<&mut Direction>,
+    timer: Res<Time>,
+) {
+    let delta_time = timer.delta_seconds();
+    for ApplyForceEvent(id, force, factor) in apply_force_event_handler.iter() {
+        if let Ok(mut direction) = creature_query.get_mut(*id) {
+            direction.lerp(*force, factor * delta_time);
         }
     }
 }
@@ -411,17 +431,34 @@ impl Plugin for BoidsPlugin {
     fn build(&self, app: &mut App) {
         // Insert Resources
         app.insert_resource(self.initial_boid_factors)
-            .insert_resource(self.initial_chaser_factors);
+            .insert_resource(self.initial_chaser_factors)
+            .add_event::<ApplyForceEvent>();
 
         // Start up
         app.add_startup_system(setup_creatures);
 
         app.add_system(move_system)
             .add_system(wrap_borders_system)
-            .add_system(scare_system)
-            .add_system(chase_system)
-            .add_system(boid_flocking_system)
-            .add_system(chaser_flocking_system)
             .add_system(update_factors_system);
+
+        app.add_system_set(
+            SystemSet::new()
+                .label("flocking")
+                .with_system(boid_flocking_system)
+                .with_system(chaser_flocking_system),
+        );
+
+        app.add_system_set(
+            SystemSet::new()
+                .label("interactions")
+                .with_system(scare_system)
+                .with_system(chase_system),
+        );
+
+        app.add_system(
+            apply_force_event_system
+                .after("flocking")
+                .after("interactions"),
+        );
     }
 }
