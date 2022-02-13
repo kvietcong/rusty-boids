@@ -1,1 +1,2 @@
+# Builds Native and Web versions of rust-boids
 cargo build --release && cargo build --release --target wasm32-unknown-unknown && wasm-bindgen --out-dir .\docs\ --target no-modules .\target\wasm32-unknown-unknown\release\rusty-boids.wasm

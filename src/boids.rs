@@ -267,29 +267,25 @@ fn chase_system(
 }
 
 fn boid_flocking_system(
-    boid_query: Query<(Entity, &Direction, &Transform, &Sprite), With<Boid>>,
+    boids: Query<(Entity, &Direction, &Transform, &Sprite), With<Boid>>,
     apply_force_event_handler: EventWriter<ApplyForceEvent>,
     boid_factors: Res<BoidFactors>,
 ) {
-    let mut boids = vec![];
-    boid_query.iter().for_each(|boid| boids.push(boid));
     send_flocking_forces(
         apply_force_event_handler,
-        boids,
+        boids.iter().collect(),
         boid_factors.to_flocking_factors(),
     );
 }
 
 fn chaser_flocking_system(
-    chaser_query: Query<(Entity, &Direction, &Transform, &Sprite), With<Chaser>>,
+    chasers: Query<(Entity, &Direction, &Transform, &Sprite), With<Chaser>>,
     apply_force_event_handler: EventWriter<ApplyForceEvent>,
     chaser_factors: Res<ChaserFactors>,
 ) {
-    let mut chasers = vec![];
-    chaser_query.iter().for_each(|chaser| chasers.push(chaser));
     send_flocking_forces(
         apply_force_event_handler,
-        chasers,
+        chasers.iter().collect(),
         chaser_factors.to_flocking_factors(),
     );
 }
@@ -307,9 +303,10 @@ fn send_flocking_forces(
         collision_avoidance,
     } = factors;
     for (id_a, _, trans_a, sprite_a) in creatures.iter() {
-        let mut average_position = Vec2::ZERO;
-        let mut average_direction = Vec2::ZERO;
-        let mut average_close_position = Vec2::ZERO;
+        let mut average_position = Vec2::ZERO; // Cohesion
+        let mut average_direction = Vec2::ZERO; // Alignment
+        let mut average_close_position = Vec2::ZERO; // Separation
+
         let mut vision_count = 0;
         let mut half_vision_count = 0;
 
