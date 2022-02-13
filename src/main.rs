@@ -2,9 +2,11 @@ use bevy::{
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     prelude::*,
 };
-use boids::*;
-mod boids;
 use std::time::Duration;
+mod boids;
+use boids::*;
+mod ui;
+use ui::*;
 
 const WIDTH: f32 = 1600.0;
 const HEIGHT: f32 = 900.0;
@@ -36,6 +38,9 @@ fn main() {
 
     // Adding Boids Simulation
     app.add_plugin(BoidsPlugin::default());
+
+    // Adding UI
+    app.add_plugin(UiPlugin::default());
 
     // Diagnostic stuff (FPS printing, etc)
     app.add_plugin(FrameTimeDiagnosticsPlugin::default())
