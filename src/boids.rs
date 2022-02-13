@@ -294,6 +294,206 @@ fn chaser_flocking_system(
     );
 }
 
+fn boid_cohesion_system(
+    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+    boid_query: Query<(Entity, &Transform), With<Boid>>,
+    boid_factors: Res<BoidFactors>,
+) {
+    for (id_a, trans_a) in boid_query.iter() {
+        let mut average_position = Vec2::ZERO;
+        let mut count = 0;
+        for (id_b, trans_b) in boid_query.iter() {
+            if id_a == id_b { continue; }
+            let distance = trans_a.translation.distance(trans_b.translation);
+            if distance < boid_factors.vision {
+                count += 1;
+                average_position += Vec2::new(trans_b.translation.x, trans_b.translation.y);
+            }
+        }
+        if count > 0 {
+            average_position /= count as f32;
+            let cohesion_force = Vec2::new(
+                average_position.x - trans_a.translation.x,
+                average_position.y - trans_a.translation.y,
+            )
+            .normalize();
+            apply_force_event_handler.send(ApplyForceEvent(id_a, cohesion_force, boid_factors.cohesion));
+        }
+    }
+}
+
+fn boid_separation_system(
+    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+    boid_query: Query<(Entity, &Transform), With<Boid>>,
+    boid_factors: Res<BoidFactors>,
+) {
+    for (id_a, trans_a) in boid_query.iter() {
+        let mut average_position = Vec2::ZERO;
+        let mut count = 0;
+        for (id_b, trans_b) in boid_query.iter() {
+            if id_a == id_b { continue; }
+            let distance = trans_a.translation.distance(trans_b.translation);
+            if distance < boid_factors.vision / 2.0 {
+                count += 1;
+                average_position += Vec2::new(trans_b.translation.x, trans_b.translation.y);
+            }
+        }
+        if count > 0 {
+            average_position /= count as f32;
+            let separation_force = Vec2::new(
+                trans_a.translation.x - average_position.x,
+                trans_a.translation.y - average_position.y,
+            )
+            .normalize();
+            apply_force_event_handler.send(ApplyForceEvent(id_a, separation_force, boid_factors.separation));
+        }
+    }
+}
+
+fn boid_alignment_system(
+    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+    boid_query: Query<(Entity, &Transform, &Direction), With<Boid>>,
+    boid_factors: Res<BoidFactors>,
+) {
+    for (id_a, trans_a, dir_a) in boid_query.iter() {
+        let mut average_direction = Vec2::ZERO;
+        let mut count = 0;
+        for (id_b, trans_b, dir_b) in boid_query.iter() {
+            if id_a == id_b { continue; }
+            let distance = trans_a.translation.distance(trans_b.translation);
+            if distance < boid_factors.vision / 2.0 {
+                count += 1;
+                average_direction += dir_b.0;
+            }
+        }
+        if count > 0 {
+            average_direction /= count as f32;
+            apply_force_event_handler.send(ApplyForceEvent(id_a, average_direction.normalize(), boid_factors.alignment));
+        }
+    }
+}
+
+fn boid_collision_avoidance_system(
+    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+    boid_query: Query<(Entity, &Transform), With<Boid>>,
+    boid_factors: Res<BoidFactors>,
+) {
+    for (id_a, trans_a) in boid_query.iter() {
+        for (id_b, trans_b) in boid_query.iter() {
+            if id_a == id_b { continue; }
+            let distance = trans_a.translation.distance(trans_b.translation);
+            if distance < boid_factors.size.x {
+                let collision_avoidance_force = Vec2::new(
+                    trans_a.translation.x - trans_b.translation.x,
+                    trans_a.translation.y - trans_b.translation.y,
+                )
+                .normalize();
+                apply_force_event_handler.send(ApplyForceEvent(id_a, collision_avoidance_force, boid_factors.collision_avoidance));
+            }
+        }
+    }
+}
+
+fn chaser_cohesion_system(
+    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+    chaser_query: Query<(Entity, &Transform), With<Chaser>>,
+    chaser_factors: Res<ChaserFactors>,
+) {
+    for (id_a, trans_a) in chaser_query.iter() {
+        let mut average_position = Vec2::ZERO;
+        let mut count = 0;
+        for (id_b, trans_b) in chaser_query.iter() {
+            if id_a == id_b { continue; }
+            let distance = trans_a.translation.distance(trans_b.translation);
+            if distance < chaser_factors.vision {
+                count += 1;
+                average_position += Vec2::new(trans_b.translation.x, trans_b.translation.y);
+            }
+        }
+        if count > 0 {
+            average_position /= count as f32;
+            let cohesion_force = Vec2::new(
+                average_position.x - trans_a.translation.x,
+                average_position.y - trans_a.translation.y,
+            )
+            .normalize();
+            apply_force_event_handler.send(ApplyForceEvent(id_a, cohesion_force, chaser_factors.cohesion));
+        }
+    }
+}
+
+fn chaser_separation_system(
+    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+    chaser_query: Query<(Entity, &Transform), With<Chaser>>,
+    chaser_factors: Res<ChaserFactors>,
+) {
+    for (id_a, trans_a) in chaser_query.iter() {
+        let mut average_position = Vec2::ZERO;
+        let mut count = 0;
+        for (id_b, trans_b) in chaser_query.iter() {
+            if id_a == id_b { continue; }
+            let distance = trans_a.translation.distance(trans_b.translation);
+            if distance < chaser_factors.vision / 2.0 {
+                count += 1;
+                average_position += Vec2::new(trans_b.translation.x, trans_b.translation.y);
+            }
+        }
+        if count > 0 {
+            average_position /= count as f32;
+            let separation_force = Vec2::new(
+                trans_a.translation.x - average_position.x,
+                trans_a.translation.y - average_position.y,
+            )
+            .normalize();
+            apply_force_event_handler.send(ApplyForceEvent(id_a, separation_force, chaser_factors.separation));
+        }
+    }
+}
+
+fn chaser_alignment_system(
+    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+    chaser_query: Query<(Entity, &Transform, &Direction), With<Chaser>>,
+    chaser_factors: Res<ChaserFactors>,
+) {
+    for (id_a, trans_a, dir_a) in chaser_query.iter() {
+        let mut average_direction = Vec2::ZERO;
+        let mut count = 0;
+        for (id_b, trans_b, dir_b) in chaser_query.iter() {
+            if id_a == id_b { continue; }
+            let distance = trans_a.translation.distance(trans_b.translation);
+            if distance < chaser_factors.vision / 2.0 {
+                count += 1;
+                average_direction += dir_b.0;
+            }
+        }
+        if count > 0 {
+            average_direction /= count as f32;
+            apply_force_event_handler.send(ApplyForceEvent(id_a, average_direction.normalize(), chaser_factors.alignment));
+        }
+    }
+}
+
+fn chaser_collision_avoidance_system(
+    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+    chaser_query: Query<(Entity, &Transform), With<Chaser>>,
+    chaser_factors: Res<ChaserFactors>,
+) {
+    for (id_a, trans_a) in chaser_query.iter() {
+        for (id_b, trans_b) in chaser_query.iter() {
+            if id_a == id_b { continue; }
+            let distance = trans_a.translation.distance(trans_b.translation);
+            if distance < chaser_factors.size.x {
+                let collision_avoidance_force = Vec2::new(
+                    trans_a.translation.x - trans_b.translation.x,
+                    trans_a.translation.y - trans_b.translation.y,
+                )
+                .normalize();
+                apply_force_event_handler.send(ApplyForceEvent(id_a, collision_avoidance_force, chaser_factors.collision_avoidance));
+            }
+        }
+    }
+}
+
 fn send_flocking_forces(
     mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
     creatures: Vec<(Entity, &Direction, &Transform, &Sprite)>,
@@ -465,13 +665,28 @@ impl Plugin for BoidsPlugin {
 
         app.add_system_set(SystemSet::on_update(SimState::Running).with_system(move_system));
 
+        // app.add_system_set(
+        //     SystemSet::on_update(SimState::Running)
+        //         .label("flocking")
+        //         .label("force_adding")
+        //         .with_system(boid_flocking_system)
+        //         .with_system(chaser_flocking_system),
+        // );
+
         app.add_system_set(
             SystemSet::on_update(SimState::Running)
                 .label("flocking")
                 .label("force_adding")
-                .with_system(boid_flocking_system)
-                .with_system(chaser_flocking_system),
+                .with_system(boid_cohesion_system)
+                .with_system(boid_separation_system)
+                .with_system(boid_alignment_system)
+                .with_system(boid_collision_avoidance_system)
+                .with_system(chaser_cohesion_system)
+                .with_system(chaser_separation_system)
+                .with_system(chaser_alignment_system)
+                .with_system(chaser_collision_avoidance_system),
         );
+
 
         app.add_system_set(
             SystemSet::on_update(SimState::Running)
