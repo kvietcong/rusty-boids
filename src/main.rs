@@ -11,8 +11,9 @@ use ui::*;
 const WIDTH: f32 = 1600.0;
 const HEIGHT: f32 = 900.0;
 
-fn setup_camera(mut commands: Commands) {
+fn setup_cameras(mut commands: Commands) {
     commands.spawn_bundle(OrthographicCameraBundle::new_2d());
+    commands.spawn_bundle(UiCameraBundle::default());
 }
 
 fn setup_window(mut windows: ResMut<Windows>) {
@@ -26,7 +27,7 @@ fn main() {
 
     // Startup Things
     app.add_plugins(DefaultPlugins)
-        .add_startup_system(setup_camera)
+        .add_startup_system(setup_cameras)
         .add_startup_system(setup_window) // IDK Why the window doesn't resize with the descriptor
         .insert_resource(ClearColor(Color::rgb(0.0, 0.0, 0.0)))
         .insert_resource(WindowDescriptor {
