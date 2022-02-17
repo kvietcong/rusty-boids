@@ -1,8 +1,11 @@
-use bevy::prelude::*;
+use std::collections::HashMap;
+use bevy::{prelude::*, math::Vec3Swizzles};
 use rand::prelude::*;
 
 pub const BOIDS: usize = 1000;
 pub const CHASERS: usize = BOIDS / 100;
+
+pub const CHUNK_RESOLUTION: usize = 25;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum SimState {
@@ -70,6 +73,19 @@ struct FlockingFactors {
 
 #[derive(Component, Clone, Debug, PartialEq)]
 struct Direction(Vec2);
+
+// Why no work when adding directly to vec2?
+impl From<Vec2> for Direction {
+    fn from(v: Vec2) -> Self {
+        Direction(v)
+    }
+}
+
+impl From<Direction> for Vec2 {
+    fn from(d: Direction) -> Self {
+        d.0
+    }
+}
 
 impl Direction {
     fn lerp(&mut self, other: Vec2, t: f32) {
@@ -190,15 +206,15 @@ fn wrap_borders_system(mut query: Query<&mut Transform>, windows: ResMut<Windows
     let width = window.width();
     let height = window.height();
     for mut transform in query.iter_mut() {
-        if transform.translation.x > width / 2.0 {
-            transform.translation.x = -width / 2.0;
-        } else if transform.translation.x < -width / 2.0 {
-            transform.translation.x = width / 2.0;
+        if transform.translation.x >= width / 2.0 {
+            transform.translation.x = -width / 2.0 + 1.0;
+        } else if transform.translation.x <= -width / 2.0 {
+            transform.translation.x = width / 2.0 - 1.0;
         }
-        if transform.translation.y > height / 2.0 {
-            transform.translation.y = -height / 2.0;
-        } else if transform.translation.y < -height / 2.0 {
-            transform.translation.y = height / 2.0;
+        if transform.translation.y >= height / 2.0 {
+            transform.translation.y = -height / 2.0 + 1.0;
+        } else if transform.translation.y <= -height / 2.0 {
+            transform.translation.y = height / 2.0 - 1.0;
         }
     }
 }
@@ -213,11 +229,7 @@ fn scare_system(
         for trans_b in chasers.iter() {
             let distance = trans_a.translation.distance(trans_b.translation);
             if distance < boid_factors.vision {
-                let run_direction = Vec2::new(
-                    trans_a.translation.x - trans_b.translation.x,
-                    trans_a.translation.y - trans_b.translation.y,
-                )
-                .normalize();
+                let run_direction = (trans_a.translation.xy() - trans_b.translation.xy()).normalize();
                 apply_force_event_handler.send(ApplyForceEvent(
                     id,
                     run_direction,
@@ -252,11 +264,7 @@ fn chase_system(
             }
         }
         if let (_, Some(closest_trans)) = closest_target {
-            let chase_direction = Vec2::new(
-                closest_trans.translation.x - trans_a.translation.x,
-                closest_trans.translation.y - trans_a.translation.y,
-            )
-            .normalize();
+            let chase_direction = (closest_trans.translation.xy() - trans_a.translation.xy()).normalize();
             apply_force_event_handler.send(ApplyForceEvent(
                 id,
                 chase_direction,
@@ -270,11 +278,19 @@ fn boid_flocking_system(
     boids: Query<(Entity, &Direction, &Transform, &Sprite), With<Boid>>,
     apply_force_event_handler: EventWriter<ApplyForceEvent>,
     boid_factors: Res<BoidFactors>,
+    cache_grid: Res<CacheGrid>,
+    windows: Res<Windows>,
 ) {
+    let mut boid_map = HashMap::new();
+    for boid in boids.iter() {
+        boid_map.insert(boid.0, (boid.1, boid.2, boid.3));
+    }
     send_flocking_forces(
         apply_force_event_handler,
-        boids.iter().collect(),
+        boid_map,
+        cache_grid,
         boid_factors.to_flocking_factors(),
+        windows,
     );
 }
 
@@ -282,19 +298,33 @@ fn chaser_flocking_system(
     chasers: Query<(Entity, &Direction, &Transform, &Sprite), With<Chaser>>,
     apply_force_event_handler: EventWriter<ApplyForceEvent>,
     chaser_factors: Res<ChaserFactors>,
+    cache_grid: Res<CacheGrid>,
+    windows: Res<Windows>,
 ) {
+    let mut chaser_map = HashMap::new();
+    for chaser in chasers.iter() {
+        chaser_map.insert(chaser.0, (chaser.1, chaser.2, chaser.3));
+    }
     send_flocking_forces(
         apply_force_event_handler,
-        chasers.iter().collect(),
+        chaser_map,
+        cache_grid,
         chaser_factors.to_flocking_factors(),
+        windows,
     );
 }
 
 fn send_flocking_forces(
     mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
-    creatures: Vec<(Entity, &Direction, &Transform, &Sprite)>,
+    creatures: HashMap<Entity, (&Direction, &Transform, &Sprite)>,
+    cache_grid: Res<CacheGrid>,
     factors: FlockingFactors,
+    windows: Res<Windows>,
 ) {
+    let window = windows.get_primary().unwrap();
+    let screen_width = window.width();
+    let screen_height = window.height();
+
     let FlockingFactors {
         vision,
         cohesion,
@@ -302,7 +332,11 @@ fn send_flocking_forces(
         separation,
         collision_avoidance,
     } = factors;
-    for (id_a, _, trans_a, sprite_a) in creatures.iter() {
+
+    for id_a in creatures.keys() {
+        let (_dir_a, trans_a, sprite_a) = creatures.get(id_a).unwrap();
+        let pos_a = trans_a.translation.xy();
+
         let mut average_position = Vec2::ZERO; // Cohesion
         let mut average_direction = Vec2::ZERO; // Alignment
         let mut average_close_position = Vec2::ZERO; // Separation
@@ -310,27 +344,34 @@ fn send_flocking_forces(
         let mut vision_count = 0;
         let mut half_vision_count = 0;
 
-        for (id_b, dir_b, trans_b, _) in creatures.iter() {
-            if id_a == id_b {
+        let possibles = cache_grid.get_possibles(
+            screen_width, screen_height,
+            pos_a,
+            vision
+        );
+        // println!("Possibles for {:?}: {:?}\n", id_a, possibles);
+        for id_b in possibles {
+            if !creatures.contains_key(&id_b) {
                 continue;
             }
-            let distance = trans_a.translation.distance(trans_b.translation);
+            let (dir_b, trans_b, _sprite_b) = creatures.get(&id_b).unwrap();
+            if *id_a == id_b {
+                continue;
+            }
+            let pos_b = trans_b.translation.xy();
+            let distance = pos_a.distance(pos_b);
             if distance < vision {
                 vision_count += 1;
-                average_position += Vec2::new(trans_b.translation.x, trans_b.translation.y);
+                average_position += pos_b;
                 average_direction += dir_b.0;
             }
             if distance < vision / 2.0 {
                 half_vision_count += 1;
-                average_close_position += Vec2::new(trans_b.translation.x, trans_b.translation.y);
+                average_close_position += pos_b;
             }
             if let Some(size) = sprite_a.custom_size {
                 if distance < size.x * 2.0 {
-                    let away_direction = Vec2::new(
-                        trans_a.translation.x - trans_b.translation.x,
-                        trans_a.translation.y - trans_b.translation.y,
-                    )
-                    .normalize();
+                    let away_direction = (trans_a.translation.xy() - trans_b.translation.xy()).normalize();
                     apply_force_event_handler.send(ApplyForceEvent(
                         *id_a,
                         away_direction,
@@ -343,11 +384,7 @@ fn send_flocking_forces(
         if vision_count > 0 {
             average_position /= vision_count as f32;
             average_direction /= vision_count as f32;
-            let cohesion_force = Vec2::new(
-                average_position.x - trans_a.translation.x,
-                average_position.y - trans_a.translation.y,
-            )
-            .normalize();
+            let cohesion_force = (average_position - trans_a.translation.xy()).normalize();
             apply_force_event_handler.send(ApplyForceEvent(*id_a, cohesion_force, cohesion));
             apply_force_event_handler.send(ApplyForceEvent(
                 *id_a,
@@ -357,11 +394,7 @@ fn send_flocking_forces(
         }
         if half_vision_count > 0 {
             average_close_position /= half_vision_count as f32;
-            let separation_force = Vec2::new(
-                trans_a.translation.x - average_close_position.x,
-                trans_a.translation.y - average_close_position.y,
-            )
-            .normalize();
+            let separation_force = (trans_a.translation.xy() - average_close_position).normalize();
             apply_force_event_handler.send(ApplyForceEvent(*id_a, separation_force, separation));
         }
     }
@@ -400,7 +433,11 @@ fn apply_force_event_system(
     }
 }
 
-fn handle_input_system(keys: Res<Input<KeyCode>>, mut sim_state: ResMut<State<SimState>>) {
+fn handle_input_system(
+    keys: Res<Input<KeyCode>>,
+    cache_grid: Res<CacheGrid>,
+    mut sim_state: ResMut<State<SimState>>,
+) {
     if keys.just_pressed(KeyCode::P) {
         let current_sim_state = sim_state.current();
         let new_sim_state = match current_sim_state {
@@ -408,6 +445,12 @@ fn handle_input_system(keys: Res<Input<KeyCode>>, mut sim_state: ResMut<State<Si
             SimState::Running => SimState::Paused,
         };
         sim_state.set(new_sim_state).unwrap();
+    }
+    if keys.just_pressed(KeyCode::D) {
+        for row in cache_grid.iter() {
+            println!("{:?}", row);
+        }
+        println!();
     }
 }
 
@@ -454,20 +497,38 @@ impl Plugin for BoidsPlugin {
             .add_state(SimState::Running);
 
         // Start up
-        app.add_startup_system(setup_creatures);
+        app.add_startup_system(setup_creatures)
+            .add_startup_system(setup_world);
 
-        app.add_system(wrap_borders_system)
-            .add_system(update_factors_system)
-            .add_system(handle_input_system);
+        app.add_system_set(
+            SystemSet::new()
+                .label("sim_updates")
+                .with_system(update_factors_system)
+                .with_system(handle_input_system)
+        );
 
-        app.add_system_set(SystemSet::on_update(SimState::Running).with_system(move_system));
+        app.add_system_set(
+            SystemSet::on_update(SimState::Running)
+                .label("movement")
+                .with_system(move_system)
+                .with_system(wrap_borders_system)
+                .before("caching")
+        );
+
+        app.add_system_set(
+            SystemSet::on_update(SimState::Running)
+                .label("caching")
+                .with_system(update_cache_grid_system)
+                .after("movement")
+        );
 
         app.add_system_set(
             SystemSet::on_update(SimState::Running)
                 .label("flocking")
                 .label("force_adding")
                 .with_system(boid_flocking_system)
-                .with_system(chaser_flocking_system),
+                .with_system(chaser_flocking_system)
+                .after("caching"),
         );
 
         app.add_system_set(
@@ -475,7 +536,8 @@ impl Plugin for BoidsPlugin {
                 .label("interactions")
                 .label("force_adding")
                 .with_system(scare_system)
-                .with_system(chase_system),
+                .with_system(chase_system)
+                .after("caching"),
         );
 
         app.add_system_set(
@@ -484,4 +546,114 @@ impl Plugin for BoidsPlugin {
                 .after("force_adding"),
         );
     }
+}
+
+#[derive(Debug, Default)]
+struct CacheGrid {
+    grid: Vec<Vec<Vec<Entity>>>,
+}
+
+impl<'a> IntoIterator for &'a CacheGrid {
+    type Item = &'a Vec<Vec<Entity>>;
+    type IntoIter = CacheGridIterator<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        CacheGridIterator { cache_grid: self, i: 0 }
+    }
+}
+
+struct CacheGridIterator<'a> {
+    cache_grid: &'a CacheGrid,
+    i: usize,
+}
+
+impl<'a> Iterator for CacheGridIterator<'a> {
+    type Item = &'a Vec<Vec<Entity>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.i >= self.cache_grid.grid.len() {
+            return None;
+        }
+        let result = Some(&self.cache_grid.grid[self.i]);
+        self.i += 1;
+        result
+    }
+}
+
+impl CacheGrid {
+    fn get_possibles(&self, screen_width: f32, screen_height: f32, position: Vec2, radius: f32) -> Vec<Entity> {
+        let rows = self.grid.len();
+        let cols = self.grid[0].len();
+
+        let x = position.x;
+        let y = -position.y; // What in the actual frick. Why does flipping the sign make it better?
+
+        let x_begin = x - radius - 1.0;
+        let y_begin = y - radius - 1.0;
+        let i_begin = ((y_begin / screen_height + 0.5) * rows as f32).floor() as usize;
+        let j_begin = ((x_begin / screen_width + 0.5) * cols as f32).floor() as usize;
+
+        let i_to = (radius * 2.0 / screen_height).ceil() as usize;
+        let j_to = (radius * 2.0 / screen_width).ceil() as usize;
+
+        let i_begin = i_begin.clamp(0, rows - 1);
+        let j_begin = j_begin.clamp(0, cols - 1);
+        let i_end = (i_begin + i_to).clamp(0, rows - 1);
+        let j_end = (j_begin + j_to).clamp(0, cols - 1);
+        // println!("{:?} {:?}", rows, cols);
+        // println!("{:?}", position);
+        // println!("{:?} {:?} {:?} {:?}", i_begin, j_begin, i_end, j_end);
+
+        let mut possibles = vec![];
+
+        for i in i_begin..=i_end {
+            for j in j_begin..=j_end {
+                possibles.extend(self.grid[i][j].iter());
+            }
+        }
+
+        possibles
+    }
+
+    fn iter(&self) -> CacheGridIterator {
+        CacheGridIterator {
+            cache_grid: self,
+            i: 0,
+        }
+    }
+}
+
+fn setup_world(mut commands: Commands) {
+    commands.insert_resource(
+        CacheGrid {
+            grid: vec![vec![vec![]; 0]; 0],
+        }
+    );
+}
+
+fn update_cache_grid_system(
+    creature_query: Query<(Entity, &Transform), Or<(With<Boid>, With<Chaser>)>>,
+    mut cache_grid: ResMut<CacheGrid>,
+    windows: Res<Windows>,
+) {
+    let window = windows.get_primary().unwrap();
+    let screen_width = window.width();
+    let screen_height = window.height();
+
+    let rows = (screen_height / CHUNK_RESOLUTION as f32).ceil() as usize;
+    let cols = (screen_width / CHUNK_RESOLUTION as f32).ceil() as usize;
+
+    let mut new_grid = vec![vec![vec![]; cols]; rows];
+
+    for (entity, transform) in creature_query.iter() {
+        let x = transform.translation.x;
+        let y = -transform.translation.y; // What in the actual frick. Why does flipping the sign make it better?
+        let i = (y / screen_height + 0.5) * rows as f32;
+        let j = (x / screen_width + 0.5) * cols as f32;
+        let i = (i.floor() as usize).clamp(0, rows - 1);
+        let j = (j.floor() as usize).clamp(0, cols - 1);
+        new_grid[i][j].push(entity);
+    }
+
+    cache_grid.grid = new_grid;
 }

@@ -34,6 +34,8 @@ fn main() {
             title: "Bevy - Le Boids".to_string(),
             width: WIDTH,
             height: HEIGHT,
+            vsync: false,
+            resizable: true,
             ..WindowDescriptor::default()
         }); // For some reason, this doesn't do anything
 
