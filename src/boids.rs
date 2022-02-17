@@ -5,7 +5,7 @@ use rand::prelude::*;
 pub const BOIDS: usize = 1000;
 pub const CHASERS: usize = BOIDS / 100;
 
-pub const CHUNK_RESOLUTION: usize = 25;
+pub const CHUNK_RESOLUTION: usize = 20;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum SimState {
@@ -224,9 +224,22 @@ fn scare_system(
     boids: Query<(Entity, &Transform), With<Boid>>,
     chasers: Query<&Transform, With<Chaser>>,
     boid_factors: Res<BoidFactors>,
+    cache_grid: Res<CacheGrid>,
+    windows: Res<Windows>,
 ) {
+    let window = windows.get_primary().unwrap();
+    let screen_width = window.width();
+    let screen_height = window.height();
     for (id, trans_a) in boids.iter() {
-        for trans_b in chasers.iter() {
+        let possibles = cache_grid.get_possibles(
+            screen_width, screen_height,
+            trans_a.translation.xy(), boid_factors.vision);
+        for id_b in possibles {
+            let trans_b;
+            match chasers.get(id_b) {
+                Ok(transform) => trans_b = transform,
+                Err(_) => continue,
+            }
             let distance = trans_a.translation.distance(trans_b.translation);
             if distance < boid_factors.vision {
                 let run_direction = (trans_a.translation.xy() - trans_b.translation.xy()).normalize();
@@ -245,10 +258,24 @@ fn chase_system(
     chasers: Query<(Entity, &Transform), With<Chaser>>,
     boids: Query<&Transform, With<Boid>>,
     chaser_factors: Res<ChaserFactors>,
+    cache_grid: Res<CacheGrid>,
+    windows: Res<Windows>,
 ) {
+    let window = windows.get_primary().unwrap();
+    let screen_width = window.width();
+    let screen_height = window.height();
+
     for (id, trans_a) in chasers.iter() {
         let mut closest_target = (0.0, None);
-        for trans_b in boids.iter() {
+        let possibles = cache_grid.get_possibles(
+            screen_width, screen_height,
+            trans_a.translation.xy(), chaser_factors.vision);
+        for id_b in possibles {
+            let trans_b;
+            match boids.get(id_b) {
+                Ok(transform) => trans_b = transform,
+                Err(_) => continue,
+            }
             let distance = trans_a.translation.distance(trans_b.translation);
             if distance < chaser_factors.vision {
                 closest_target = match closest_target {
@@ -349,7 +376,6 @@ fn send_flocking_forces(
             pos_a,
             vision
         );
-        // println!("Possibles for {:?}: {:?}\n", id_a, possibles);
         for id_b in possibles {
             if !creatures.contains_key(&id_b) {
                 continue;
@@ -588,21 +614,18 @@ impl CacheGrid {
         let x = position.x;
         let y = -position.y; // What in the actual frick. Why does flipping the sign make it better?
 
-        let x_begin = x - radius - 1.0;
-        let y_begin = y - radius - 1.0;
-        let i_begin = ((y_begin / screen_height + 0.5) * rows as f32).floor() as usize;
-        let j_begin = ((x_begin / screen_width + 0.5) * cols as f32).floor() as usize;
+        let x_begin = x - radius;
+        let y_begin = y - radius;
+        let i_begin = (((y_begin / screen_height + 0.5) * rows as f32) as usize).clamp(0, rows - 1);
+        let j_begin = (((x_begin / screen_width + 0.5) * cols as f32) as usize).clamp(0, cols - 1);
 
-        let i_to = (radius * 2.0 / screen_height).ceil() as usize;
-        let j_to = (radius * 2.0 / screen_width).ceil() as usize;
+        // A comment here to remind me of the bug I had that took 4 days to fix.
+        // I forgot to multiply by rows and cols. I'm so dumb for that
+        let i_to = (radius * 2.0 / screen_height * rows as f32).ceil() as usize;
+        let j_to = (radius * 2.0 / screen_width * cols as f32).ceil() as usize;
 
-        let i_begin = i_begin.clamp(0, rows - 1);
-        let j_begin = j_begin.clamp(0, cols - 1);
         let i_end = (i_begin + i_to).clamp(0, rows - 1);
         let j_end = (j_begin + j_to).clamp(0, cols - 1);
-        // println!("{:?} {:?}", rows, cols);
-        // println!("{:?}", position);
-        // println!("{:?} {:?} {:?} {:?}", i_begin, j_begin, i_end, j_end);
 
         let mut possibles = vec![];
 
@@ -648,10 +671,8 @@ fn update_cache_grid_system(
     for (entity, transform) in creature_query.iter() {
         let x = transform.translation.x;
         let y = -transform.translation.y; // What in the actual frick. Why does flipping the sign make it better?
-        let i = (y / screen_height + 0.5) * rows as f32;
-        let j = (x / screen_width + 0.5) * cols as f32;
-        let i = (i.floor() as usize).clamp(0, rows - 1);
-        let j = (j.floor() as usize).clamp(0, cols - 1);
+        let i = (((y / screen_height + 0.5) * rows as f32) as usize).clamp(0, rows - 1);
+        let j = (((x / screen_width + 0.5) * cols as f32) as usize).clamp(0, cols - 1);
         new_grid[i][j].push(entity);
     }
 
