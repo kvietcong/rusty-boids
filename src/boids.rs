@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use bevy::{prelude::*, math::Vec3Swizzles};
+use bevy::{math::Vec3Swizzles, prelude::*};
 use rand::prelude::*;
+use std::collections::{HashMap, HashSet};
 
 pub const BOIDS: usize = 1000;
-pub const CHASERS: usize = BOIDS / 100;
+pub const CHASERS: usize = BOIDS / 200;
 
 pub const CHUNK_RESOLUTION: usize = 20;
 
@@ -184,12 +184,19 @@ fn setup_creatures(
 }
 
 fn move_system(
-    mut query: Query<(&mut Transform, &Direction, Option<&Boid>, Option<&Chaser>)>,
+    mut query: Query<(
+        Entity,
+        &mut Transform,
+        &Direction,
+        Option<&Boid>,
+        Option<&Chaser>,
+    )>,
     chaser_factors: Res<ChaserFactors>,
+    mut cache_grid: ResMut<CacheGrid>,
     boid_factors: Res<BoidFactors>,
     timer: Res<Time>,
 ) {
-    for (mut transform, direction, boid_opt, chaser_opt) in query.iter_mut() {
+    for (id, mut transform, direction, boid_opt, chaser_opt) in query.iter_mut() {
         let speed = match (boid_opt, chaser_opt) {
             (Some(_), None) => boid_factors.speed,
             (None, Some(_)) => chaser_factors.speed,
@@ -198,6 +205,7 @@ fn move_system(
         transform.translation.x += direction.0.x * speed * timer.delta_seconds();
         transform.translation.y += direction.0.y * speed * timer.delta_seconds();
         transform.rotation = Quat::from_rotation_z(direction.0.y.atan2(direction.0.x));
+        cache_grid.update(id, transform.translation.xy());
     }
 }
 
@@ -225,15 +233,9 @@ fn scare_system(
     chasers: Query<&Transform, With<Chaser>>,
     boid_factors: Res<BoidFactors>,
     cache_grid: Res<CacheGrid>,
-    windows: Res<Windows>,
 ) {
-    let window = windows.get_primary().unwrap();
-    let screen_width = window.width();
-    let screen_height = window.height();
     for (id, trans_a) in boids.iter() {
-        let possibles = cache_grid.get_possibles(
-            screen_width, screen_height,
-            trans_a.translation.xy(), boid_factors.vision);
+        let possibles = cache_grid.get_possibles(trans_a.translation.xy(), boid_factors.vision);
         for id_b in possibles {
             let trans_b;
             match chasers.get(id_b) {
@@ -242,7 +244,8 @@ fn scare_system(
             }
             let distance = trans_a.translation.distance(trans_b.translation);
             if distance < boid_factors.vision {
-                let run_direction = (trans_a.translation.xy() - trans_b.translation.xy()).normalize();
+                let run_direction =
+                    (trans_a.translation.xy() - trans_b.translation.xy()).normalize();
                 apply_force_event_handler.send(ApplyForceEvent(
                     id,
                     run_direction,
@@ -259,17 +262,10 @@ fn chase_system(
     boids: Query<&Transform, With<Boid>>,
     chaser_factors: Res<ChaserFactors>,
     cache_grid: Res<CacheGrid>,
-    windows: Res<Windows>,
 ) {
-    let window = windows.get_primary().unwrap();
-    let screen_width = window.width();
-    let screen_height = window.height();
-
     for (id, trans_a) in chasers.iter() {
         let mut closest_target = (0.0, None);
-        let possibles = cache_grid.get_possibles(
-            screen_width, screen_height,
-            trans_a.translation.xy(), chaser_factors.vision);
+        let possibles = cache_grid.get_possibles(trans_a.translation.xy(), chaser_factors.vision);
         for id_b in possibles {
             let trans_b;
             match boids.get(id_b) {
@@ -291,7 +287,8 @@ fn chase_system(
             }
         }
         if let (_, Some(closest_trans)) = closest_target {
-            let chase_direction = (closest_trans.translation.xy() - trans_a.translation.xy()).normalize();
+            let chase_direction =
+                (closest_trans.translation.xy() - trans_a.translation.xy()).normalize();
             apply_force_event_handler.send(ApplyForceEvent(
                 id,
                 chase_direction,
@@ -306,7 +303,6 @@ fn boid_flocking_system(
     apply_force_event_handler: EventWriter<ApplyForceEvent>,
     boid_factors: Res<BoidFactors>,
     cache_grid: Res<CacheGrid>,
-    windows: Res<Windows>,
 ) {
     let mut boid_map = HashMap::new();
     for boid in boids.iter() {
@@ -317,7 +313,6 @@ fn boid_flocking_system(
         boid_map,
         cache_grid,
         boid_factors.to_flocking_factors(),
-        windows,
     );
 }
 
@@ -326,7 +321,6 @@ fn chaser_flocking_system(
     apply_force_event_handler: EventWriter<ApplyForceEvent>,
     chaser_factors: Res<ChaserFactors>,
     cache_grid: Res<CacheGrid>,
-    windows: Res<Windows>,
 ) {
     let mut chaser_map = HashMap::new();
     for chaser in chasers.iter() {
@@ -337,7 +331,6 @@ fn chaser_flocking_system(
         chaser_map,
         cache_grid,
         chaser_factors.to_flocking_factors(),
-        windows,
     );
 }
 
@@ -346,12 +339,7 @@ fn send_flocking_forces(
     creatures: HashMap<Entity, (&Direction, &Transform, &Sprite)>,
     cache_grid: Res<CacheGrid>,
     factors: FlockingFactors,
-    windows: Res<Windows>,
 ) {
-    let window = windows.get_primary().unwrap();
-    let screen_width = window.width();
-    let screen_height = window.height();
-
     let FlockingFactors {
         vision,
         cohesion,
@@ -371,11 +359,7 @@ fn send_flocking_forces(
         let mut vision_count = 0;
         let mut half_vision_count = 0;
 
-        let possibles = cache_grid.get_possibles(
-            screen_width, screen_height,
-            pos_a,
-            vision
-        );
+        let possibles = cache_grid.get_possibles(pos_a, vision);
         for id_b in possibles {
             if !creatures.contains_key(&id_b) {
                 continue;
@@ -397,7 +381,8 @@ fn send_flocking_forces(
             }
             if let Some(size) = sprite_a.custom_size {
                 if distance < size.x * 2.0 {
-                    let away_direction = (trans_a.translation.xy() - trans_b.translation.xy()).normalize();
+                    let away_direction =
+                        (trans_a.translation.xy() - trans_b.translation.xy()).normalize();
                     apply_force_event_handler.send(ApplyForceEvent(
                         *id_a,
                         away_direction,
@@ -519,18 +504,21 @@ impl Plugin for BoidsPlugin {
         // Insert Resources
         app.insert_resource(self.initial_boid_factors)
             .insert_resource(self.initial_chaser_factors)
+            .insert_resource(CacheGrid {
+                ..Default::default()
+            })
             .add_event::<ApplyForceEvent>()
             .add_state(SimState::Running);
 
         // Start up
-        app.add_startup_system(setup_creatures)
-            .add_startup_system(setup_world);
+        app.add_startup_system(setup_creatures);
 
         app.add_system_set(
             SystemSet::new()
                 .label("sim_updates")
                 .with_system(update_factors_system)
                 .with_system(handle_input_system)
+                .with_system(on_window_resize_system),
         );
 
         app.add_system_set(
@@ -538,14 +526,14 @@ impl Plugin for BoidsPlugin {
                 .label("movement")
                 .with_system(move_system)
                 .with_system(wrap_borders_system)
-                .before("caching")
+                .before("caching"),
         );
 
         app.add_system_set(
             SystemSet::on_update(SimState::Running)
                 .label("caching")
-                .with_system(update_cache_grid_system)
-                .after("movement")
+                .with_system(cache_grid_update_system)
+                .after("movement"),
         );
 
         app.add_system_set(
@@ -576,15 +564,21 @@ impl Plugin for BoidsPlugin {
 
 #[derive(Debug, Default)]
 struct CacheGrid {
-    grid: Vec<Vec<Vec<Entity>>>,
+    grid: Vec<Vec<HashSet<Entity>>>,
+    associations: HashMap<Entity, (usize, usize)>,
+    width: f32,
+    height: f32,
 }
 
 impl<'a> IntoIterator for &'a CacheGrid {
-    type Item = &'a Vec<Vec<Entity>>;
+    type Item = &'a Vec<HashSet<Entity>>;
     type IntoIter = CacheGridIterator<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        CacheGridIterator { cache_grid: self, i: 0 }
+        CacheGridIterator {
+            cache_grid: self,
+            i: 0,
+        }
     }
 }
 
@@ -594,7 +588,7 @@ struct CacheGridIterator<'a> {
 }
 
 impl<'a> Iterator for CacheGridIterator<'a> {
-    type Item = &'a Vec<Vec<Entity>>;
+    type Item = &'a Vec<HashSet<Entity>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.i >= self.cache_grid.grid.len() {
@@ -607,35 +601,65 @@ impl<'a> Iterator for CacheGridIterator<'a> {
 }
 
 impl CacheGrid {
-    fn get_possibles(&self, screen_width: f32, screen_height: f32, position: Vec2, radius: f32) -> Vec<Entity> {
+    fn update(&mut self, id: Entity, pos: Vec2) {
         let rows = self.grid.len();
+        if rows == 0 {
+            return;
+        }
+        let cols = self.grid[0].len();
+
+        let x = pos.x;
+        let y = pos.y;
+
+        let i = (((y / self.height + 0.5) * rows as f32) as usize).clamp(0, rows - 1);
+        let j = (((x / self.width + 0.5) * cols as f32) as usize).clamp(0, cols - 1);
+
+        if let Some((old_i, old_j)) = self.associations.get(&id) {
+            let old_i = *old_i;
+            let old_j = *old_j;
+            if i == old_i && j == old_j {
+                return;
+            }
+            if old_i < rows && old_j < cols {
+                self.grid[old_i][old_j].remove(&id);
+            }
+        }
+
+        self.grid[i][j].insert(id);
+        self.associations.insert(id, (i, j));
+    }
+
+    fn get_possibles(&self, position: Vec2, radius: f32) -> Vec<Entity> {
+        let mut result = vec![];
+        let rows = self.grid.len();
+        if rows == 0 {
+            return result;
+        }
         let cols = self.grid[0].len();
 
         let x = position.x;
-        let y = -position.y; // What in the actual frick. Why does flipping the sign make it better?
+        let y = position.y;
 
         let x_begin = x - radius;
         let y_begin = y - radius;
-        let i_begin = (((y_begin / screen_height + 0.5) * rows as f32) as usize).clamp(0, rows - 1);
-        let j_begin = (((x_begin / screen_width + 0.5) * cols as f32) as usize).clamp(0, cols - 1);
+        let i_begin = (((y_begin / self.height + 0.5) * rows as f32) as usize).clamp(0, rows - 1);
+        let j_begin = (((x_begin / self.width + 0.5) * cols as f32) as usize).clamp(0, cols - 1);
 
         // A comment here to remind me of the bug I had that took 4 days to fix.
         // I forgot to multiply by rows and cols. I'm so dumb for that
-        let i_to = (radius * 2.0 / screen_height * rows as f32).ceil() as usize;
-        let j_to = (radius * 2.0 / screen_width * cols as f32).ceil() as usize;
+        let i_to = (radius * 2.0 / self.height * rows as f32).ceil() as usize;
+        let j_to = (radius * 2.0 / self.width * cols as f32).ceil() as usize;
 
         let i_end = (i_begin + i_to).clamp(0, rows - 1);
         let j_end = (j_begin + j_to).clamp(0, cols - 1);
 
-        let mut possibles = vec![];
-
         for i in i_begin..=i_end {
             for j in j_begin..=j_end {
-                possibles.extend(self.grid[i][j].iter());
+                result.extend(self.grid[i][j].iter());
             }
         }
 
-        possibles
+        result
     }
 
     fn iter(&self) -> CacheGridIterator {
@@ -646,19 +670,23 @@ impl CacheGrid {
     }
 }
 
-fn setup_world(mut commands: Commands) {
-    commands.insert_resource(
-        CacheGrid {
-            grid: vec![vec![vec![]; 0]; 0],
-        }
-    );
+fn cache_grid_update_system(
+    creature_query: Query<(Entity, &Transform), Changed<Transform>>,
+    mut cache_grid: ResMut<CacheGrid>,
+) {
+    for (entity, transform) in creature_query.iter() {
+        cache_grid.update(entity, transform.translation.xy());
+    }
 }
 
-fn update_cache_grid_system(
-    creature_query: Query<(Entity, &Transform), Or<(With<Boid>, With<Chaser>)>>,
+fn on_window_resize_system(
+    mut resize_event: EventReader<bevy::window::WindowResized>,
     mut cache_grid: ResMut<CacheGrid>,
     windows: Res<Windows>,
 ) {
+    if resize_event.iter().count() == 0 {
+        return;
+    }
     let window = windows.get_primary().unwrap();
     let screen_width = window.width();
     let screen_height = window.height();
@@ -666,15 +694,7 @@ fn update_cache_grid_system(
     let rows = (screen_height / CHUNK_RESOLUTION as f32).ceil() as usize;
     let cols = (screen_width / CHUNK_RESOLUTION as f32).ceil() as usize;
 
-    let mut new_grid = vec![vec![vec![]; cols]; rows];
-
-    for (entity, transform) in creature_query.iter() {
-        let x = transform.translation.x;
-        let y = -transform.translation.y; // What in the actual frick. Why does flipping the sign make it better?
-        let i = (((y / screen_height + 0.5) * rows as f32) as usize).clamp(0, rows - 1);
-        let j = (((x / screen_width + 0.5) * cols as f32) as usize).clamp(0, cols - 1);
-        new_grid[i][j].push(entity);
-    }
-
-    cache_grid.grid = new_grid;
+    cache_grid.width = screen_width;
+    cache_grid.height = screen_height;
+    cache_grid.grid = vec![vec![HashSet::new(); cols]; rows];
 }
