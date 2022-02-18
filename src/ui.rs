@@ -3,10 +3,32 @@ use bevy::{
     prelude::*,
 };
 
+use crate::DebugState;
+
 #[derive(Component)]
 struct FPSText;
 
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+#[derive(Default, Debug)]
+struct Cursor(f32, f32);
+
+impl Cursor {
+    fn new(x: f32, y: f32) -> Self {
+        Self(x, y)
+    }
+
+    fn set(&mut self, mouse: Cursor) {
+        self.0 = mouse.0;
+        self.1 = mouse.1;
+    }
+}
+
+impl From<Vec2> for Cursor {
+    fn from(vec: Vec2) -> Self {
+        Self(vec.x, vec.y)
+    }
+}
+
+fn fps_text_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands
         .spawn_bundle(TextBundle {
             style: Style {
@@ -44,7 +66,10 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         .insert(FPSText);
 }
 
-fn text_update_system(diagnostics: Res<Diagnostics>, mut query: Query<&mut Text, With<FPSText>>) {
+fn fps_text_update_system(
+    diagnostics: Res<Diagnostics>,
+    mut query: Query<&mut Text, With<FPSText>>,
+) {
     for mut text in query.iter_mut() {
         if let Some(fps) = diagnostics.get(FrameTimeDiagnosticsPlugin::FPS) {
             if let Some(average) = fps.average() {
@@ -61,16 +86,30 @@ fn text_update_system(diagnostics: Res<Diagnostics>, mut query: Query<&mut Text,
     }
 }
 
-pub struct UiPlugin;
-
-impl Default for UiPlugin {
-    fn default() -> Self {
-        Self {}
+fn cursor_update_system(windows: Res<Windows>, mut cursor: ResMut<Cursor>) {
+    if let Some(window) = windows.get_primary() {
+        if let Some(absolute_cursor_position) = window.cursor_position() {
+            let window_dimensions = Vec2::new(window.width() as f32, window.height() as f32);
+            let final_position = absolute_cursor_position - window_dimensions / 2.0;
+            cursor.set(final_position.into());
+        }
     }
 }
 
+fn debug_mouse_system(cursor: Res<Cursor>) {
+    println!("{:?}", cursor.as_ref());
+}
+
+#[derive(Default)]
+pub struct UiPlugin;
+
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_startup_system(setup).add_system(text_update_system);
+        app.add_startup_system(fps_text_setup)
+            .insert_resource(Cursor::new(0.0, 0.0))
+            .add_system(fps_text_update_system)
+            .add_system(cursor_update_system);
+
+        app.add_system_set(SystemSet::on_update(DebugState::On).with_system(debug_mouse_system));
     }
 }

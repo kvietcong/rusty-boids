@@ -2,6 +2,8 @@ use bevy::{math::Vec3Swizzles, prelude::*};
 use rand::prelude::*;
 use std::collections::{HashMap, HashSet};
 
+use crate::DebugState;
+
 pub const BOIDS: usize = 1000;
 pub const CHASERS: usize = BOIDS / 200;
 
@@ -100,6 +102,114 @@ struct Boid;
 struct Chaser;
 
 struct ApplyForceEvent(Entity, Vec2, f32);
+
+#[derive(Debug, Default)]
+struct CacheGrid {
+    grid: Vec<Vec<HashSet<Entity>>>,
+    associations: HashMap<Entity, (usize, usize)>,
+    width: f32,
+    height: f32,
+}
+
+impl<'a> IntoIterator for &'a CacheGrid {
+    type Item = &'a Vec<HashSet<Entity>>;
+    type IntoIter = CacheGridIterator<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        CacheGridIterator {
+            cache_grid: self,
+            i: 0,
+        }
+    }
+}
+
+struct CacheGridIterator<'a> {
+    cache_grid: &'a CacheGrid,
+    i: usize,
+}
+
+impl<'a> Iterator for CacheGridIterator<'a> {
+    type Item = &'a Vec<HashSet<Entity>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.i >= self.cache_grid.grid.len() {
+            return None;
+        }
+        let result = Some(&self.cache_grid.grid[self.i]);
+        self.i += 1;
+        result
+    }
+}
+
+impl CacheGrid {
+    fn update(&mut self, id: Entity, pos: Vec2) {
+        let rows = self.grid.len();
+        if rows == 0 {
+            return;
+        }
+        let cols = self.grid[0].len();
+
+        let x = pos.x;
+        let y = pos.y;
+
+        let i = (((y / self.height + 0.5) * rows as f32) as usize).clamp(0, rows - 1);
+        let j = (((x / self.width + 0.5) * cols as f32) as usize).clamp(0, cols - 1);
+
+        if let Some((old_i, old_j)) = self.associations.get(&id) {
+            let old_i = *old_i;
+            let old_j = *old_j;
+            if i == old_i && j == old_j {
+                return;
+            }
+            if old_i < rows && old_j < cols {
+                self.grid[old_i][old_j].remove(&id);
+            }
+        }
+
+        self.grid[i][j].insert(id);
+        self.associations.insert(id, (i, j));
+    }
+
+    fn get_possibles(&self, position: Vec2, radius: f32) -> Vec<Entity> {
+        let mut result = vec![];
+        let rows = self.grid.len();
+        if rows == 0 {
+            return result;
+        }
+        let cols = self.grid[0].len();
+
+        let x = position.x;
+        let y = position.y;
+
+        let x_begin = x - radius;
+        let y_begin = y - radius;
+        let i_begin = (((y_begin / self.height + 0.5) * rows as f32) as usize).clamp(0, rows - 1);
+        let j_begin = (((x_begin / self.width + 0.5) * cols as f32) as usize).clamp(0, cols - 1);
+
+        // A comment here to remind me of the bug I had that took 4 days to fix.
+        // I forgot to multiply by rows and cols. I'm so dumb for that
+        let i_to = (radius * 2.0 / self.height * rows as f32).ceil() as usize;
+        let j_to = (radius * 2.0 / self.width * cols as f32).ceil() as usize;
+
+        let i_end = (i_begin + i_to).clamp(0, rows - 1);
+        let j_end = (j_begin + j_to).clamp(0, cols - 1);
+
+        for i in i_begin..=i_end {
+            for j in j_begin..=j_end {
+                result.extend(self.grid[i][j].iter());
+            }
+        }
+
+        result
+    }
+
+    fn iter(&self) -> CacheGridIterator {
+        CacheGridIterator {
+            cache_grid: self,
+            i: 0,
+        }
+    }
+}
 
 fn spawn_creature(
     rng: &mut ThreadRng,
@@ -444,11 +554,7 @@ fn apply_force_event_system(
     }
 }
 
-fn handle_input_system(
-    keys: Res<Input<KeyCode>>,
-    cache_grid: Res<CacheGrid>,
-    mut sim_state: ResMut<State<SimState>>,
-) {
+fn handle_input_system(keys: Res<Input<KeyCode>>, mut sim_state: ResMut<State<SimState>>) {
     if keys.just_pressed(KeyCode::P) {
         let current_sim_state = sim_state.current();
         let new_sim_state = match current_sim_state {
@@ -457,12 +563,48 @@ fn handle_input_system(
         };
         sim_state.set(new_sim_state).unwrap();
     }
-    if keys.just_pressed(KeyCode::D) {
-        for row in cache_grid.iter() {
-            println!("{:?}", row);
+}
+
+fn cache_grid_update_system(
+    creature_query: Query<(Entity, &Transform), Changed<Transform>>,
+    mut cache_grid: ResMut<CacheGrid>,
+) {
+    for (entity, transform) in creature_query.iter() {
+        cache_grid.update(entity, transform.translation.xy());
+    }
+}
+
+fn debug_cache_grid_system(cache_grid: Res<CacheGrid>) {
+    if !cache_grid.is_changed() {
+        return;
+    }
+    println!("Cache Grid:");
+    for row in cache_grid.iter() {
+        for entities in row {
+            print!("{:02} ", entities.len());
         }
         println!();
     }
+}
+
+fn on_window_resize_system(
+    mut resize_event: EventReader<bevy::window::WindowResized>,
+    mut cache_grid: ResMut<CacheGrid>,
+    windows: Res<Windows>,
+) {
+    if resize_event.iter().count() == 0 {
+        return;
+    }
+    let window = windows.get_primary().unwrap();
+    let screen_width = window.width();
+    let screen_height = window.height();
+
+    let rows = (screen_height / CHUNK_RESOLUTION as f32).ceil() as usize;
+    let cols = (screen_width / CHUNK_RESOLUTION as f32).ceil() as usize;
+
+    cache_grid.width = screen_width;
+    cache_grid.height = screen_height;
+    cache_grid.grid = vec![vec![HashSet::new(); cols]; rows];
 }
 
 pub struct BoidsPlugin {
@@ -559,142 +701,9 @@ impl Plugin for BoidsPlugin {
                 .with_system(apply_force_event_system)
                 .after("force_adding"),
         );
+
+        app.add_system_set(
+            SystemSet::on_update(DebugState::On).with_system(debug_cache_grid_system),
+        );
     }
-}
-
-#[derive(Debug, Default)]
-struct CacheGrid {
-    grid: Vec<Vec<HashSet<Entity>>>,
-    associations: HashMap<Entity, (usize, usize)>,
-    width: f32,
-    height: f32,
-}
-
-impl<'a> IntoIterator for &'a CacheGrid {
-    type Item = &'a Vec<HashSet<Entity>>;
-    type IntoIter = CacheGridIterator<'a>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        CacheGridIterator {
-            cache_grid: self,
-            i: 0,
-        }
-    }
-}
-
-struct CacheGridIterator<'a> {
-    cache_grid: &'a CacheGrid,
-    i: usize,
-}
-
-impl<'a> Iterator for CacheGridIterator<'a> {
-    type Item = &'a Vec<HashSet<Entity>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.i >= self.cache_grid.grid.len() {
-            return None;
-        }
-        let result = Some(&self.cache_grid.grid[self.i]);
-        self.i += 1;
-        result
-    }
-}
-
-impl CacheGrid {
-    fn update(&mut self, id: Entity, pos: Vec2) {
-        let rows = self.grid.len();
-        if rows == 0 {
-            return;
-        }
-        let cols = self.grid[0].len();
-
-        let x = pos.x;
-        let y = pos.y;
-
-        let i = (((y / self.height + 0.5) * rows as f32) as usize).clamp(0, rows - 1);
-        let j = (((x / self.width + 0.5) * cols as f32) as usize).clamp(0, cols - 1);
-
-        if let Some((old_i, old_j)) = self.associations.get(&id) {
-            let old_i = *old_i;
-            let old_j = *old_j;
-            if i == old_i && j == old_j {
-                return;
-            }
-            if old_i < rows && old_j < cols {
-                self.grid[old_i][old_j].remove(&id);
-            }
-        }
-
-        self.grid[i][j].insert(id);
-        self.associations.insert(id, (i, j));
-    }
-
-    fn get_possibles(&self, position: Vec2, radius: f32) -> Vec<Entity> {
-        let mut result = vec![];
-        let rows = self.grid.len();
-        if rows == 0 {
-            return result;
-        }
-        let cols = self.grid[0].len();
-
-        let x = position.x;
-        let y = position.y;
-
-        let x_begin = x - radius;
-        let y_begin = y - radius;
-        let i_begin = (((y_begin / self.height + 0.5) * rows as f32) as usize).clamp(0, rows - 1);
-        let j_begin = (((x_begin / self.width + 0.5) * cols as f32) as usize).clamp(0, cols - 1);
-
-        // A comment here to remind me of the bug I had that took 4 days to fix.
-        // I forgot to multiply by rows and cols. I'm so dumb for that
-        let i_to = (radius * 2.0 / self.height * rows as f32).ceil() as usize;
-        let j_to = (radius * 2.0 / self.width * cols as f32).ceil() as usize;
-
-        let i_end = (i_begin + i_to).clamp(0, rows - 1);
-        let j_end = (j_begin + j_to).clamp(0, cols - 1);
-
-        for i in i_begin..=i_end {
-            for j in j_begin..=j_end {
-                result.extend(self.grid[i][j].iter());
-            }
-        }
-
-        result
-    }
-
-    fn iter(&self) -> CacheGridIterator {
-        CacheGridIterator {
-            cache_grid: self,
-            i: 0,
-        }
-    }
-}
-
-fn cache_grid_update_system(
-    creature_query: Query<(Entity, &Transform), Changed<Transform>>,
-    mut cache_grid: ResMut<CacheGrid>,
-) {
-    for (entity, transform) in creature_query.iter() {
-        cache_grid.update(entity, transform.translation.xy());
-    }
-}
-
-fn on_window_resize_system(
-    mut resize_event: EventReader<bevy::window::WindowResized>,
-    mut cache_grid: ResMut<CacheGrid>,
-    windows: Res<Windows>,
-) {
-    if resize_event.iter().count() == 0 {
-        return;
-    }
-    let window = windows.get_primary().unwrap();
-    let screen_width = window.width();
-    let screen_height = window.height();
-
-    let rows = (screen_height / CHUNK_RESOLUTION as f32).ceil() as usize;
-    let cols = (screen_width / CHUNK_RESOLUTION as f32).ceil() as usize;
-
-    cache_grid.width = screen_width;
-    cache_grid.height = screen_height;
-    cache_grid.grid = vec![vec![HashSet::new(); cols]; rows];
 }
