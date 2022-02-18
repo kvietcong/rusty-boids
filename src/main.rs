@@ -77,3 +77,5 @@ fn main() {
 
 // TODO:
 // - Make live-adjustable factors
+// - Make flocking more streamlined
+// - Have flocking groups
