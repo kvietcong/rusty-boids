@@ -28,8 +28,11 @@ fn setup_window(mut windows: ResMut<Windows>) {
     window.set_title("Le Boids".to_string());
 }
 
-fn handle_input_system(keys: Res<Input<KeyCode>>, mut debug_state: ResMut<State<DebugState>>) {
-    if keys.just_pressed(KeyCode::D) {
+fn handle_input_presses_system(
+    keys: Res<Input<KeyCode>>,
+    mut debug_state: ResMut<State<DebugState>>,
+) {
+    if keys.just_pressed(KeyCode::D) && keys.just_pressed(KeyCode::LShift) {
         let current_sim_state = debug_state.current();
         let new_debug_state = match current_sim_state {
             DebugState::On => DebugState::Off,
@@ -57,7 +60,7 @@ fn main() {
             ..WindowDescriptor::default()
         }); // For some reason, this doesn't do anything
 
-    app.add_system(handle_input_system);
+    app.add_system(handle_input_presses_system);
 
     // Adding Boids Simulation
     app.add_plugin(BoidsPlugin::default());
