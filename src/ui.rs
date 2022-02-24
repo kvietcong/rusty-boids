@@ -7,7 +7,7 @@ use bevy_egui::{
     EguiContext, EguiPlugin,
 };
 
-use crate::BoidFactors;
+use crate::{BoidFactors, ChaserFactors};
 
 #[derive(Component)]
 struct FPSText;
@@ -73,15 +73,10 @@ fn fps_text_update_system(
 fn egui_system(
     mut egui_context: ResMut<EguiContext>,
     mut boid_factors: ResMut<BoidFactors>,
-    windows: Res<Windows>,
+    mut chaser_factors: ResMut<ChaserFactors>,
 ) {
-    let window = windows.get_primary().unwrap();
-    let width = window.width();
-    let height = window.height();
-
     egui::Window::new("Boid Factors")
         .anchor(egui::Align2::RIGHT_BOTTOM, [-5.0, -5.0])
-        .current_pos(Pos2::from((width, height)))
         .show(egui_context.ctx_mut(), |ui| {
             ui.add(egui::Slider::new(&mut boid_factors.speed, 20.0..=200.0).text("Speed"));
             ui.add(egui::Slider::new(&mut boid_factors.alignment, 0.0..=20.0).text("Alignment"));
@@ -93,6 +88,21 @@ fn egui_system(
             );
             ui.add(egui::Slider::new(&mut boid_factors.scare, 0.0..=20.0).text("Scare"));
             ui.add(egui::Slider::new(&mut boid_factors.vision, 10.0..=200.0).text("Vision"));
+        });
+
+    egui::Window::new("Chaser Factors")
+        .anchor(egui::Align2::LEFT_BOTTOM, [5.0, -5.0])
+        .show(egui_context.ctx_mut(), |ui| {
+            ui.add(egui::Slider::new(&mut chaser_factors.speed, 20.0..=200.0).text("Speed"));
+            ui.add(egui::Slider::new(&mut chaser_factors.alignment, 0.0..=20.0).text("Alignment"));
+            ui.add(egui::Slider::new(&mut chaser_factors.cohesion, 0.0..=20.0).text("Cohesion"));
+            ui.add(egui::Slider::new(&mut chaser_factors.separation, 0.0..=20.0).text("Separation"));
+            ui.add(
+                egui::Slider::new(&mut chaser_factors.collision_avoidance, 0.0..=20.0)
+                    .text("Collision Avoidance"),
+            );
+            ui.add(egui::Slider::new(&mut chaser_factors.chase, 0.0..=20.0).text("Chase"));
+            ui.add(egui::Slider::new(&mut chaser_factors.vision, 10.0..=200.0).text("Vision"));
         });
 }
 
