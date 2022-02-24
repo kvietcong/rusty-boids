@@ -2,6 +2,7 @@ use bevy::{
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     prelude::*,
 };
+
 use std::time::Duration;
 mod boids;
 use boids::*;

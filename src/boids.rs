@@ -20,15 +20,15 @@ pub enum SimState {
 
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct BoidFactors {
-    color: Color,
-    speed: f32,
-    vision: f32,
-    size: Vec2,
-    cohesion: f32,
-    separation: f32,
-    alignment: f32,
-    collision_avoidance: f32,
-    scare: f32,
+    pub color: Color,
+    pub speed: f32,
+    pub vision: f32,
+    pub size: Vec2,
+    pub cohesion: f32,
+    pub separation: f32,
+    pub alignment: f32,
+    pub collision_avoidance: f32,
+    pub scare: f32,
 }
 
 impl BoidFactors {
@@ -45,15 +45,15 @@ impl BoidFactors {
 
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct ChaserFactors {
-    color: Color,
-    speed: f32,
-    vision: f32,
-    size: Vec2,
-    cohesion: f32,
-    separation: f32,
-    alignment: f32,
-    collision_avoidance: f32,
-    chase: f32,
+    pub color: Color,
+    pub speed: f32,
+    pub vision: f32,
+    pub size: Vec2,
+    pub cohesion: f32,
+    pub separation: f32,
+    pub alignment: f32,
+    pub collision_avoidance: f32,
+    pub chase: f32,
 }
 
 impl ChaserFactors {

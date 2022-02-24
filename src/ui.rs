@@ -2,31 +2,15 @@ use bevy::{
     diagnostic::{Diagnostics, FrameTimeDiagnosticsPlugin},
     prelude::*,
 };
+use bevy_egui::{
+    egui::{self, Pos2},
+    EguiContext, EguiPlugin,
+};
 
-use crate::DebugState;
+use crate::BoidFactors;
 
 #[derive(Component)]
 struct FPSText;
-
-#[derive(Default, Debug)]
-struct Cursor(f32, f32);
-
-impl Cursor {
-    fn new(x: f32, y: f32) -> Self {
-        Self(x, y)
-    }
-
-    fn set(&mut self, mouse: Cursor) {
-        self.0 = mouse.0;
-        self.1 = mouse.1;
-    }
-}
-
-impl From<Vec2> for Cursor {
-    fn from(vec: Vec2) -> Self {
-        Self(vec.x, vec.y)
-    }
-}
 
 fn fps_text_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands
@@ -86,18 +70,30 @@ fn fps_text_update_system(
     }
 }
 
-fn cursor_update_system(windows: Res<Windows>, mut cursor: ResMut<Cursor>) {
-    if let Some(window) = windows.get_primary() {
-        if let Some(absolute_cursor_position) = window.cursor_position() {
-            let window_dimensions = Vec2::new(window.width() as f32, window.height() as f32);
-            let final_position = absolute_cursor_position - window_dimensions / 2.0;
-            cursor.set(final_position.into());
-        }
-    }
-}
+fn egui_system(
+    mut egui_context: ResMut<EguiContext>,
+    mut boid_factors: ResMut<BoidFactors>,
+    windows: Res<Windows>,
+) {
+    let window = windows.get_primary().unwrap();
+    let width = window.width();
+    let height = window.height();
 
-fn debug_mouse_system(cursor: Res<Cursor>) {
-    println!("{:?}", cursor.as_ref());
+    egui::Window::new("Boid Factors")
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-5.0, -5.0])
+        .current_pos(Pos2::from((width, height)))
+        .show(egui_context.ctx_mut(), |ui| {
+            ui.add(egui::Slider::new(&mut boid_factors.speed, 20.0..=200.0).text("Speed"));
+            ui.add(egui::Slider::new(&mut boid_factors.alignment, 0.0..=20.0).text("Alignment"));
+            ui.add(egui::Slider::new(&mut boid_factors.cohesion, 0.0..=20.0).text("Cohesion"));
+            ui.add(egui::Slider::new(&mut boid_factors.separation, 0.0..=20.0).text("Separation"));
+            ui.add(
+                egui::Slider::new(&mut boid_factors.collision_avoidance, 0.0..=20.0)
+                    .text("Collision Avoidance"),
+            );
+            ui.add(egui::Slider::new(&mut boid_factors.scare, 0.0..=20.0).text("Scare"));
+            ui.add(egui::Slider::new(&mut boid_factors.vision, 10.0..=200.0).text("Vision"));
+        });
 }
 
 #[derive(Default)]
@@ -105,11 +101,10 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_startup_system(fps_text_setup)
-            .insert_resource(Cursor::new(0.0, 0.0))
-            .add_system(fps_text_update_system)
-            .add_system(cursor_update_system);
+        app.add_plugin(EguiPlugin)
+            .add_startup_system(fps_text_setup)
+            .add_system(fps_text_update_system);
 
-        app.add_system_set(SystemSet::on_update(DebugState::On).with_system(debug_mouse_system));
+        app.add_system(egui_system);
     }
 }
