@@ -2,10 +2,7 @@ use bevy::{
     diagnostic::{Diagnostics, FrameTimeDiagnosticsPlugin},
     prelude::*,
 };
-use bevy_egui::{
-    egui::{self, Pos2},
-    EguiContext, EguiPlugin,
-};
+use bevy_egui::{egui, EguiContext, EguiPlugin};
 
 use crate::{BoidFactors, ChaserFactors};
 
@@ -96,7 +93,9 @@ fn egui_system(
             ui.add(egui::Slider::new(&mut chaser_factors.speed, 20.0..=200.0).text("Speed"));
             ui.add(egui::Slider::new(&mut chaser_factors.alignment, 0.0..=20.0).text("Alignment"));
             ui.add(egui::Slider::new(&mut chaser_factors.cohesion, 0.0..=20.0).text("Cohesion"));
-            ui.add(egui::Slider::new(&mut chaser_factors.separation, 0.0..=20.0).text("Separation"));
+            ui.add(
+                egui::Slider::new(&mut chaser_factors.separation, 0.0..=20.0).text("Separation"),
+            );
             ui.add(
                 egui::Slider::new(&mut chaser_factors.collision_avoidance, 0.0..=20.0)
                     .text("Collision Avoidance"),
