@@ -7,8 +7,9 @@ use rand::prelude::*;
 
 use crate::DebugState;
 
-pub const BOIDS: usize = 1000;
-pub const CHASERS: usize = BOIDS / 200;
+pub const POPULATION_A: usize = 800;
+pub const POPULATION_B: usize = 100;
+pub const POPULATION_C: usize = 100;
 
 pub const CHUNK_RESOLUTION: usize = 20;
 
@@ -18,8 +19,8 @@ pub enum SimState {
     Paused,
 }
 
-#[derive(Clone, Debug, PartialEq, Copy)]
-pub struct BoidFactors {
+#[derive(Debug, Default, Clone)]
+pub struct Factors {
     pub color: Color,
     pub speed: f32,
     pub vision: f32,
@@ -29,51 +30,30 @@ pub struct BoidFactors {
     pub alignment: f32,
     pub collision_avoidance: f32,
     pub scare: f32,
-}
-
-impl BoidFactors {
-    fn to_flocking_factors(&self) -> FlockingFactors {
-        FlockingFactors {
-            vision: self.vision,
-            cohesion: self.cohesion,
-            alignment: self.alignment,
-            separation: self.separation,
-            collision_avoidance: self.collision_avoidance,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Copy)]
-pub struct ChaserFactors {
-    pub color: Color,
-    pub speed: f32,
-    pub vision: f32,
-    pub size: Vec2,
-    pub cohesion: f32,
-    pub separation: f32,
-    pub alignment: f32,
-    pub collision_avoidance: f32,
     pub chase: f32,
+    pub scared_of: HashSet<CreatureType>,
+    pub will_chase: HashSet<CreatureType>,
 }
 
-impl ChaserFactors {
-    fn to_flocking_factors(&self) -> FlockingFactors {
-        FlockingFactors {
-            vision: self.vision,
-            cohesion: self.cohesion,
-            alignment: self.alignment,
-            separation: self.separation,
-            collision_avoidance: self.collision_avoidance,
+#[derive(Clone, Debug, PartialEq, Copy, Component, Eq, Hash)]
+pub enum CreatureType {
+    A,
+    B,
+    C,
+}
+
+impl CreatureType {
+    pub fn all() -> [CreatureType; 3] {
+        [CreatureType::A, CreatureType::B, CreatureType::C]
+    }
+
+    pub fn to_string(&self) -> &'static str {
+        match self {
+            CreatureType::A => "A",
+            CreatureType::B => "B",
+            CreatureType::C => "C",
         }
     }
-}
-
-struct FlockingFactors {
-    vision: f32,
-    cohesion: f32,
-    alignment: f32,
-    separation: f32,
-    collision_avoidance: f32,
 }
 
 #[derive(Component, Clone, Debug, PartialEq)]
@@ -97,12 +77,6 @@ impl Direction {
         self.0 = self.0.lerp(other, t).normalize();
     }
 }
-
-#[derive(Component, Clone, Debug, PartialEq)]
-struct Boid;
-
-#[derive(Component, Clone, Debug, PartialEq)]
-struct Chaser;
 
 struct ApplyForceEvent(Entity, Vec2, f32);
 
@@ -173,9 +147,8 @@ impl CacheGrid {
 fn spawn_creature(
     rng: &mut ThreadRng,
     commands: &mut Commands,
-    creature_type: &str,
-    boid_factors: BoidFactors,
-    chaser_factors: ChaserFactors,
+    creature_type: CreatureType,
+    all_factors: &HashMap<CreatureType, Factors>,
     screen_width: f32,
     screen_height: f32,
 ) {
@@ -184,27 +157,13 @@ fn spawn_creature(
     let direction = Direction(
         Vec2::new(rng.gen::<f32>() * 2.0 - 1.0, rng.gen::<f32>() * 2.0 - 1.0).normalize(),
     );
-    let color: Color;
-    let size: Vec2;
+    let factors = all_factors.get(&creature_type).unwrap();
     let mut creature_commands = commands.spawn();
-
-    if creature_type == "boid" {
-        creature_commands.insert(Boid);
-        color = boid_factors.color;
-        size = boid_factors.size;
-    } else if creature_type == "chaser" {
-        creature_commands.insert(Chaser);
-        color = chaser_factors.color;
-        size = chaser_factors.size;
-    } else {
-        panic!("Unknown creature type: {:?}", creature_type);
-    }
-
     creature_commands
         .insert_bundle(SpriteBundle {
             sprite: Sprite {
-                color,
-                custom_size: Some(size),
+                color: factors.color,
+                custom_size: Some(factors.size),
                 ..Sprite::default()
             },
             transform: Transform {
@@ -214,38 +173,47 @@ fn spawn_creature(
             },
             ..SpriteBundle::default()
         })
-        .insert(direction);
+        .insert(direction)
+        .insert(creature_type);
 }
 
 fn setup_creatures(
-    mut commands: Commands,
-    boid_factors: Res<BoidFactors>,
-    chaser_factors: Res<ChaserFactors>,
     windows: Res<Windows>,
+    mut commands: Commands,
+    all_factors: Res<HashMap<CreatureType, Factors>>,
 ) {
     let window = windows.get_primary().unwrap();
     let screen_width = window.width();
     let screen_height = window.height();
 
     let mut rng = rand::thread_rng();
-    for _ in 1..=BOIDS {
+    let all_factors = all_factors.as_ref();
+    for _ in 0..POPULATION_A {
         spawn_creature(
             &mut rng,
             &mut commands,
-            "boid",
-            *boid_factors,
-            *chaser_factors,
+            CreatureType::A,
+            all_factors,
             screen_width,
             screen_height,
         );
     }
-    for _ in 1..=CHASERS {
+    for _ in 0..POPULATION_B {
         spawn_creature(
             &mut rng,
             &mut commands,
-            "chaser",
-            *boid_factors,
-            *chaser_factors,
+            CreatureType::B,
+            all_factors,
+            screen_width,
+            screen_height,
+        );
+    }
+    for _ in 0..POPULATION_C {
+        spawn_creature(
+            &mut rng,
+            &mut commands,
+            CreatureType::C,
+            all_factors,
             screen_width,
             screen_height,
         );
@@ -253,17 +221,12 @@ fn setup_creatures(
 }
 
 fn move_system(
-    mut query: Query<(&mut Transform, &Direction, Option<&Boid>, Option<&Chaser>)>,
-    chaser_factors: Res<ChaserFactors>,
-    boid_factors: Res<BoidFactors>,
+    mut query: Query<(&mut Transform, &Direction, &CreatureType)>,
+    all_factors: Res<HashMap<CreatureType, Factors>>,
     timer: Res<Time>,
 ) {
-    for (mut transform, direction, boid_opt, chaser_opt) in query.iter_mut() {
-        let speed = match (boid_opt, chaser_opt) {
-            (Some(_), None) => boid_factors.speed,
-            (None, Some(_)) => chaser_factors.speed,
-            _ => 0.0,
-        };
+    for (mut transform, direction, creature_type) in query.iter_mut() {
+        let speed = all_factors.get(creature_type).unwrap().speed;
         transform.translation.x += direction.0.x * speed * timer.delta_seconds();
         transform.translation.y += direction.0.y * speed * timer.delta_seconds();
         transform.rotation = Quat::from_rotation_z(direction.0.y.atan2(direction.0.x));
@@ -290,27 +253,31 @@ fn wrap_borders_system(mut query: Query<&mut Transform>, windows: ResMut<Windows
 
 fn scare_system(
     mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
-    boids: Query<(Entity, &Transform), With<Boid>>,
-    chasers: Query<&Transform, With<Chaser>>,
-    boid_factors: Res<BoidFactors>,
+    creatures: Query<(Entity, &Transform, &CreatureType)>,
+    all_factors: Res<HashMap<CreatureType, Factors>>,
     cache_grid: Res<CacheGrid>,
 ) {
-    for (id, trans_a) in boids.iter() {
-        let possibles = cache_grid.get_possibles(trans_a.translation.xy(), boid_factors.vision);
+    for (id_a, trans_a, type_a) in creatures.iter() {
+        let factors_a = all_factors.get(type_a).unwrap();
+        let possibles = cache_grid.get_possibles(trans_a.translation.xy(), factors_a.vision);
         for id_b in possibles {
             let trans_b;
-            match chasers.get(id_b) {
-                Ok(transform) => trans_b = transform,
-                Err(_) => continue,
+            if let Ok((_, transform, type_b)) = creatures.get(id_b) {
+                if id_b == id_a || !factors_a.scared_of.contains(type_b) {
+                    continue;
+                }
+                trans_b = transform;
+            } else {
+                continue;
             }
             let distance = trans_a.translation.distance(trans_b.translation);
-            if distance < boid_factors.vision {
+            if distance < factors_a.vision {
                 let run_direction =
                     (trans_a.translation.xy() - trans_b.translation.xy()).normalize();
                 apply_force_event_handler.send(ApplyForceEvent(
-                    id,
+                    id_a,
                     run_direction,
-                    boid_factors.scare,
+                    factors_a.scare,
                 ));
             }
         }
@@ -319,22 +286,26 @@ fn scare_system(
 
 fn chase_system(
     mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
-    chasers: Query<(Entity, &Transform), With<Chaser>>,
-    boids: Query<&Transform, With<Boid>>,
-    chaser_factors: Res<ChaserFactors>,
+    creatures: Query<(Entity, &Transform, &CreatureType)>,
+    all_factors: Res<HashMap<CreatureType, Factors>>,
     cache_grid: Res<CacheGrid>,
 ) {
-    for (id, trans_a) in chasers.iter() {
+    for (id_a, trans_a, type_a) in creatures.iter() {
+        let factors_a = all_factors.get(type_a).unwrap();
         let mut closest_target = (0.0, None);
-        let possibles = cache_grid.get_possibles(trans_a.translation.xy(), chaser_factors.vision);
+        let possibles = cache_grid.get_possibles(trans_a.translation.xy(), factors_a.vision);
         for id_b in possibles {
             let trans_b;
-            match boids.get(id_b) {
-                Ok(transform) => trans_b = transform,
-                Err(_) => continue,
+            if let Ok((_, trans, type_b)) = creatures.get(id_b) {
+                if id_a == id_b || !factors_a.will_chase.contains(type_b) {
+                    continue;
+                }
+                trans_b = trans;
+            } else {
+                continue;
             }
             let distance = trans_a.translation.distance(trans_b.translation);
-            if distance < chaser_factors.vision {
+            if distance < factors_a.vision {
                 closest_target = match closest_target {
                     (_, None) => (distance, Some(trans_b)),
                     (old_distance, Some(_)) => {
@@ -350,67 +321,19 @@ fn chase_system(
         if let (_, Some(closest_trans)) = closest_target {
             let chase_direction =
                 (closest_trans.translation.xy() - trans_a.translation.xy()).normalize();
-            apply_force_event_handler.send(ApplyForceEvent(
-                id,
-                chase_direction,
-                chaser_factors.chase,
-            ));
+            apply_force_event_handler.send(ApplyForceEvent(id_a, chase_direction, factors_a.chase));
         }
     }
 }
 
-fn boid_flocking_system(
-    boids: Query<(Entity, &Direction, &Transform, &Sprite), With<Boid>>,
-    apply_force_event_handler: EventWriter<ApplyForceEvent>,
-    boid_factors: Res<BoidFactors>,
-    cache_grid: Res<CacheGrid>,
-) {
-    let mut boid_map = HashMap::default();
-    for boid in boids.iter() {
-        boid_map.insert(boid.0, (boid.1, boid.2, boid.3));
-    }
-    send_flocking_forces(
-        apply_force_event_handler,
-        boid_map,
-        cache_grid,
-        boid_factors.to_flocking_factors(),
-    );
-}
-
-fn chaser_flocking_system(
-    chasers: Query<(Entity, &Direction, &Transform, &Sprite), With<Chaser>>,
-    apply_force_event_handler: EventWriter<ApplyForceEvent>,
-    chaser_factors: Res<ChaserFactors>,
-    cache_grid: Res<CacheGrid>,
-) {
-    let mut chaser_map = HashMap::default();
-    for chaser in chasers.iter() {
-        chaser_map.insert(chaser.0, (chaser.1, chaser.2, chaser.3));
-    }
-    send_flocking_forces(
-        apply_force_event_handler,
-        chaser_map,
-        cache_grid,
-        chaser_factors.to_flocking_factors(),
-    );
-}
-
-fn send_flocking_forces(
+fn flocking_system(
+    creatures: Query<(Entity, &Direction, &Transform, &Sprite, &CreatureType)>,
     mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
-    creatures: HashMap<Entity, (&Direction, &Transform, &Sprite)>,
+    all_factors: Res<HashMap<CreatureType, Factors>>,
     cache_grid: Res<CacheGrid>,
-    factors: FlockingFactors,
 ) {
-    let FlockingFactors {
-        vision,
-        cohesion,
-        alignment,
-        separation,
-        collision_avoidance,
-    } = factors;
-
-    for id_a in creatures.keys() {
-        let (_dir_a, trans_a, sprite_a) = creatures.get(id_a).unwrap();
+    for (id_a, _dir_a, trans_a, sprite_a, type_a) in creatures.iter() {
+        let factors_a = all_factors.get(type_a).unwrap();
         let pos_a = trans_a.translation.xy();
 
         let mut average_position = Vec2::ZERO; // Cohesion
@@ -420,35 +343,33 @@ fn send_flocking_forces(
         let mut vision_count = 0;
         let mut half_vision_count = 0;
 
-        let possibles = cache_grid.get_possibles(pos_a, vision);
+        let possibles = cache_grid.get_possibles(pos_a, factors_a.vision);
         for id_b in possibles {
-            if !creatures.contains_key(&id_b) {
-                continue;
-            }
-            let (dir_b, trans_b, _sprite_b) = creatures.get(&id_b).unwrap();
-            if *id_a == id_b {
-                continue;
-            }
-            let pos_b = trans_b.translation.xy();
-            let distance = pos_a.distance(pos_b);
-            if distance < vision {
-                vision_count += 1;
-                average_position += pos_b;
-                average_direction += dir_b.0;
-            }
-            if distance < vision / 2.0 {
-                half_vision_count += 1;
-                average_close_position += pos_b;
-            }
-            if let Some(size) = sprite_a.custom_size {
-                if distance < size.x * 2.0 {
-                    let away_direction =
-                        (trans_a.translation.xy() - trans_b.translation.xy()).normalize();
-                    apply_force_event_handler.send(ApplyForceEvent(
-                        *id_a,
-                        away_direction,
-                        collision_avoidance,
-                    ));
+            if let Ok((id_b, dir_b, trans_b, _sprite_b, type_b)) = creatures.get(id_b) {
+                if id_a == id_b || type_a != type_b {
+                    continue;
+                }
+                let pos_b = trans_b.translation.xy();
+                let distance = pos_a.distance(pos_b);
+                if distance < factors_a.vision {
+                    vision_count += 1;
+                    average_position += pos_b;
+                    average_direction += dir_b.0;
+                }
+                if distance < factors_a.vision / 2.0 {
+                    half_vision_count += 1;
+                    average_close_position += pos_b;
+                }
+                if let Some(size) = sprite_a.custom_size {
+                    if distance < size.x * 2.0 {
+                        let away_direction =
+                            (trans_a.translation.xy() - trans_b.translation.xy()).normalize();
+                        apply_force_event_handler.send(ApplyForceEvent(
+                            id_a,
+                            away_direction,
+                            factors_a.collision_avoidance,
+                        ));
+                    }
                 }
             }
         }
@@ -457,37 +378,38 @@ fn send_flocking_forces(
             average_position /= vision_count as f32;
             average_direction /= vision_count as f32;
             let cohesion_force = (average_position - trans_a.translation.xy()).normalize();
-            apply_force_event_handler.send(ApplyForceEvent(*id_a, cohesion_force, cohesion));
             apply_force_event_handler.send(ApplyForceEvent(
-                *id_a,
+                id_a,
+                cohesion_force,
+                factors_a.cohesion,
+            ));
+            apply_force_event_handler.send(ApplyForceEvent(
+                id_a,
                 average_direction.normalize(),
-                alignment,
+                factors_a.alignment,
             ));
         }
         if half_vision_count > 0 {
             average_close_position /= half_vision_count as f32;
             let separation_force = (trans_a.translation.xy() - average_close_position).normalize();
-            apply_force_event_handler.send(ApplyForceEvent(*id_a, separation_force, separation));
+            apply_force_event_handler.send(ApplyForceEvent(
+                id_a,
+                separation_force,
+                factors_a.separation,
+            ));
         }
     }
 }
 
 fn update_factors_system(
-    mut chaser_query: Query<&mut Sprite, (With<Chaser>, Without<Boid>)>,
-    mut boid_query: Query<&mut Sprite, (With<Boid>, Without<Chaser>)>,
-    chaser_factors: Res<ChaserFactors>,
-    boid_factors: Res<BoidFactors>,
+    mut creature_query: Query<(&CreatureType, &mut Sprite)>,
+    all_factors: Res<HashMap<CreatureType, Factors>>,
 ) {
-    if boid_factors.is_changed() {
-        for mut sprite in boid_query.iter_mut() {
-            sprite.color = boid_factors.color;
-            sprite.custom_size = Some(boid_factors.size);
-        }
-    }
-    if chaser_factors.is_changed() {
-        for mut sprite in chaser_query.iter_mut() {
-            sprite.color = chaser_factors.color;
-            sprite.custom_size = Some(chaser_factors.size);
+    if all_factors.is_changed() {
+        for (creature_type, mut sprite) in creature_query.iter_mut() {
+            let factors = all_factors.get(creature_type).unwrap();
+            sprite.color = factors.color;
+            sprite.custom_size = Some(factors.size);
         }
     }
 }
@@ -526,44 +448,85 @@ fn cache_grid_update_system(
 }
 
 pub struct BoidsPlugin {
-    initial_boid_factors: BoidFactors,
-    initial_chaser_factors: ChaserFactors,
+    initial_factors: HashMap<CreatureType, Factors>,
 }
 
 impl Default for BoidsPlugin {
     fn default() -> Self {
-        Self {
-            initial_boid_factors: BoidFactors {
+        let mut initial_factors = HashMap::default();
+
+        let mut a_scared_of = HashSet::default();
+        a_scared_of.insert(CreatureType::B);
+        a_scared_of.insert(CreatureType::C);
+        initial_factors.insert(
+            CreatureType::A,
+            Factors {
                 color: Color::WHITE,
-                speed: 75.0,
-                vision: 30.0,
-                size: Vec2::new(10.0, 2.0),
-                cohesion: 1.00,
-                separation: 1.00,
-                alignment: 3.00,
+                speed: 70.0,
+                vision: 20.0,
+                size: Vec2::new(4.0, 1.0),
+                cohesion: 1.0,
+                separation: 1.0,
+                alignment: 3.0,
                 collision_avoidance: 3.5,
                 scare: 10.0,
+                chase: 0.0,
+                scared_of: a_scared_of,
+                will_chase: HashSet::default(),
             },
-            initial_chaser_factors: ChaserFactors {
+        );
+
+        let mut b_will_chase = HashSet::default();
+        b_will_chase.insert(CreatureType::A);
+        b_will_chase.insert(CreatureType::C);
+        initial_factors.insert(
+            CreatureType::B,
+            Factors {
                 color: Color::RED,
-                speed: 70.0,
-                vision: 50.0,
-                size: Vec2::new(16.0, 4.0),
-                cohesion: 3.00,
-                separation: 1.50,
-                alignment: 3.00,
+                speed: 60.0,
+                vision: 30.0,
+                size: Vec2::new(8.0, 4.0),
+                cohesion: 0.5,
+                separation: 0.5,
+                alignment: 2.0,
                 collision_avoidance: 2.0,
-                chase: 5.0,
+                scare: 0.0,
+                chase: 2.0,
+                scared_of: HashSet::default(),
+                will_chase: b_will_chase,
             },
-        }
+        );
+
+        let mut c_scared_of = HashSet::default();
+        c_scared_of.insert(CreatureType::B);
+        let mut c_will_chase = HashSet::default();
+        c_will_chase.insert(CreatureType::A);
+        initial_factors.insert(
+            CreatureType::C,
+            Factors {
+                color: Color::GOLD,
+                speed: 65.0,
+                vision: 25.0,
+                size: Vec2::new(6.0, 2.0),
+                cohesion: 0.75,
+                separation: 0.75,
+                alignment: 2.5,
+                collision_avoidance: 3.0,
+                scare: 5.0,
+                chase: 1.0,
+                scared_of: c_scared_of,
+                will_chase: c_will_chase,
+            },
+        );
+
+        Self { initial_factors }
     }
 }
 
 impl Plugin for BoidsPlugin {
     fn build(&self, app: &mut App) {
         // Insert Resources
-        app.insert_resource(self.initial_boid_factors)
-            .insert_resource(self.initial_chaser_factors)
+        app.insert_resource(self.initial_factors.clone())
             .insert_resource(CacheGrid {
                 ..Default::default()
             })
@@ -599,8 +562,7 @@ impl Plugin for BoidsPlugin {
             SystemSet::on_update(SimState::Running)
                 .label("flocking")
                 .label("force_adding")
-                .with_system(boid_flocking_system)
-                .with_system(chaser_flocking_system)
+                .with_system(flocking_system)
                 .after("caching"),
         );
 

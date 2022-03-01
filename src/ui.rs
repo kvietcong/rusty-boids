@@ -1,10 +1,11 @@
 use bevy::{
     diagnostic::{Diagnostics, FrameTimeDiagnosticsPlugin},
     prelude::*,
+    utils::HashMap,
 };
 use bevy_egui::{egui, EguiContext, EguiPlugin};
 
-use crate::{BoidFactors, ChaserFactors};
+use crate::{CreatureType, Factors};
 
 #[derive(Component)]
 struct FPSText;
@@ -69,39 +70,91 @@ fn fps_text_update_system(
 
 fn egui_system(
     mut egui_context: ResMut<EguiContext>,
-    mut boid_factors: ResMut<BoidFactors>,
-    mut chaser_factors: ResMut<ChaserFactors>,
+    mut all_factors: ResMut<HashMap<CreatureType, Factors>>,
 ) {
-    egui::Window::new("Boid Factors")
+    egui::Window::new("Edit Factors")
         .anchor(egui::Align2::RIGHT_BOTTOM, [-5.0, -5.0])
+        .vscroll(true)
         .show(egui_context.ctx_mut(), |ui| {
-            ui.add(egui::Slider::new(&mut boid_factors.speed, 20.0..=200.0).text("Speed"));
-            ui.add(egui::Slider::new(&mut boid_factors.alignment, 0.0..=20.0).text("Alignment"));
-            ui.add(egui::Slider::new(&mut boid_factors.cohesion, 0.0..=20.0).text("Cohesion"));
-            ui.add(egui::Slider::new(&mut boid_factors.separation, 0.0..=20.0).text("Separation"));
-            ui.add(
-                egui::Slider::new(&mut boid_factors.collision_avoidance, 0.0..=20.0)
-                    .text("Collision Avoidance"),
-            );
-            ui.add(egui::Slider::new(&mut boid_factors.scare, 0.0..=20.0).text("Scare"));
-            ui.add(egui::Slider::new(&mut boid_factors.vision, 10.0..=200.0).text("Vision"));
-        });
-
-    egui::Window::new("Chaser Factors")
-        .anchor(egui::Align2::LEFT_BOTTOM, [5.0, -5.0])
-        .show(egui_context.ctx_mut(), |ui| {
-            ui.add(egui::Slider::new(&mut chaser_factors.speed, 20.0..=200.0).text("Speed"));
-            ui.add(egui::Slider::new(&mut chaser_factors.alignment, 0.0..=20.0).text("Alignment"));
-            ui.add(egui::Slider::new(&mut chaser_factors.cohesion, 0.0..=20.0).text("Cohesion"));
-            ui.add(
-                egui::Slider::new(&mut chaser_factors.separation, 0.0..=20.0).text("Separation"),
-            );
-            ui.add(
-                egui::Slider::new(&mut chaser_factors.collision_avoidance, 0.0..=20.0)
-                    .text("Collision Avoidance"),
-            );
-            ui.add(egui::Slider::new(&mut chaser_factors.chase, 0.0..=20.0).text("Chase"));
-            ui.add(egui::Slider::new(&mut chaser_factors.vision, 10.0..=200.0).text("Vision"));
+            for creature_type in CreatureType::all() {
+                let factors = all_factors.get_mut(&creature_type).unwrap();
+                ui.collapsing(
+                    format!("Creature Type {} Factors", creature_type.to_string()),
+                    |ui| {
+                        ui.collapsing("Color", |ui| {
+                            ui.radio_value(&mut factors.color, Color::RED, "Red");
+                            ui.radio_value(&mut factors.color, Color::GREEN, "Green");
+                            ui.radio_value(&mut factors.color, Color::BLUE, "Blue");
+                            ui.radio_value(&mut factors.color, Color::WHITE, "White");
+                            ui.radio_value(&mut factors.color, Color::GOLD, "Gold");
+                        });
+                        ui.add(egui::Slider::new(&mut factors.speed, 20.0..=200.0).text("Speed"));
+                        ui.add(
+                            egui::Slider::new(&mut factors.alignment, 0.0..=20.0).text("Alignment"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut factors.cohesion, 0.0..=20.0).text("Cohesion"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut factors.separation, 0.0..=20.0)
+                                .text("Separation"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut factors.collision_avoidance, 0.0..=20.0)
+                                .text("Collision Avoidance"),
+                        );
+                        ui.add(egui::Slider::new(&mut factors.scare, 0.0..=20.0).text("Scare"));
+                        ui.add(egui::Slider::new(&mut factors.chase, 0.0..=20.0).text("Scare"));
+                        ui.add(egui::Slider::new(&mut factors.vision, 10.0..=200.0).text("Vision"));
+                        ui.collapsing("Scared Of", |ui| {
+                            for other_creature_type in CreatureType::all() {
+                                if creature_type == other_creature_type {
+                                    continue;
+                                }
+                                let text;
+                                let is_scared = factors.scared_of.contains(&other_creature_type);
+                                if is_scared {
+                                    text = format!("Scared of {}", other_creature_type.to_string());
+                                } else {
+                                    text = format!(
+                                        "Not Scared of {}",
+                                        other_creature_type.to_string()
+                                    );
+                                }
+                                if ui.button(text).clicked() {
+                                    if is_scared {
+                                        factors.scared_of.remove(&other_creature_type);
+                                    } else {
+                                        factors.scared_of.insert(other_creature_type);
+                                    }
+                                }
+                            }
+                        });
+                        ui.collapsing("Chasing", |ui| {
+                            for other_creature_type in CreatureType::all() {
+                                if creature_type == other_creature_type {
+                                    continue;
+                                }
+                                let text;
+                                let is_chasing = factors.will_chase.contains(&other_creature_type);
+                                if is_chasing {
+                                    text = format!("Chasing {}", other_creature_type.to_string());
+                                } else {
+                                    text =
+                                        format!("Not Chasing {}", other_creature_type.to_string());
+                                }
+                                if ui.button(text).clicked() {
+                                    if is_chasing {
+                                        factors.will_chase.remove(&other_creature_type);
+                                    } else {
+                                        factors.will_chase.insert(other_creature_type);
+                                    }
+                                }
+                            }
+                        });
+                    },
+                );
+            }
         });
 }
 
