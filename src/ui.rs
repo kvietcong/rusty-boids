@@ -84,7 +84,7 @@ fn egui_system(
                         ui.collapsing("Color", |ui| {
                             ui.radio_value(&mut factors.color, Color::RED, "Red");
                             ui.radio_value(&mut factors.color, Color::GREEN, "Green");
-                            ui.radio_value(&mut factors.color, Color::BLUE, "Blue");
+                            ui.radio_value(&mut factors.color, Color::rgb(0.2, 0.5, 1.0), "Blue");
                             ui.radio_value(&mut factors.color, Color::WHITE, "White");
                             ui.radio_value(&mut factors.color, Color::GOLD, "Gold");
                         });
