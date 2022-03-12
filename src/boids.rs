@@ -354,14 +354,11 @@ fn flocking_system(
     let start = std::time::Instant::now();
     let (sender, receiver) = std::sync::mpsc::channel();
 
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(4)
-        .build()
-        .unwrap();
     let tx = sender.clone();
     let creatures = &creatures;
     let all_factors = all_factors.as_ref();
-    pool.scope(move |scope| {
+    crossbeam::scope(move |scope| {
+        let mut handles = Vec::with_capacity(POPULATION_A + POPULATION_B + POPULATION_C);
         for (id_a, _dir_a, trans_a, sprite_a, type_a) in creatures.iter() {
             let tx = tx.clone();
             let creatures_arc = Arc::new(creatures);
@@ -373,7 +370,7 @@ fn flocking_system(
             let possibles = cache_grid.get_possibles(pos_a, factors_a_arc.vision);
             let possibles_arc = Arc::new(possibles);
 
-            scope.spawn(move |_| {
+            let handle = scope.spawn(move |_| {
                 let mut average_position = Vec2::ZERO; // Cohesion
                 let mut average_direction = Vec2::ZERO; // Alignment
                 let mut average_close_position = Vec2::ZERO; // Separation
@@ -443,9 +440,12 @@ fn flocking_system(
                     .unwrap();
                 }
             });
+            handles.push(handle);
         }
-    });
-    drop(pool);
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }).unwrap();
     sender.send(None).unwrap();
 
     for msg in receiver {
