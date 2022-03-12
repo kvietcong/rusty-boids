@@ -4,14 +4,21 @@ use bevy::{
     utils::{HashMap, HashSet},
 };
 use rand::prelude::*;
+use std::{sync::Arc, time::Instant};
 
 use crate::DebugState;
 
-pub const POPULATION_A: usize = 800;
-pub const POPULATION_B: usize = 100;
-pub const POPULATION_C: usize = 100;
+// pub const POPULATION_A: usize = 800;
+// pub const POPULATION_B: usize = 100;
+// pub const POPULATION_C: usize = 100;
+pub const POPULATION_A: usize = 5000;
+pub const POPULATION_B: usize = 500;
+pub const POPULATION_C: usize = 500;
 
-pub const CHUNK_RESOLUTION: usize = 20;
+pub const CHUNK_RESOLUTION: usize = 15;
+
+#[derive(Debug, Default)]
+struct DebugTimes(HashMap<String, Vec<u128>>);
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum SimState {
@@ -115,9 +122,7 @@ impl CacheGrid {
         self.associations.insert(id, (i, j));
     }
 
-    fn get_possibles(&self, position: Vec2, radius: f32) -> Vec<Entity> {
-        let mut result = vec![];
-
+    fn get_indices(&self, position: Vec2, radius: f32) -> (i8, i8, i8, i8) {
         let x = position.x;
         let y = position.y;
 
@@ -132,15 +137,21 @@ impl CacheGrid {
         let i_end = i_begin + i_to;
         let j_end = j_begin + j_to;
 
+        (i_begin, i_end, j_begin, j_end)
+    }
+
+    fn get_possibles(&self, position: Vec2, radius: f32) -> Vec<Entity> {
+        let mut possibles = Vec::with_capacity(800);
+        let indices = self.get_indices(position, radius);
+        let (i_begin, i_end, j_begin, j_end) = indices;
         for i in i_begin..=i_end {
             for j in j_begin..=j_end {
                 if let Some(set) = self.grid.get(&(i, j)) {
-                    result.extend(set.iter());
+                    possibles.extend(set.iter());
                 }
             }
         }
-
-        result
+        possibles
     }
 }
 
@@ -289,7 +300,9 @@ fn chase_system(
     creatures: Query<(Entity, &Transform, &CreatureType)>,
     all_factors: Res<HashMap<CreatureType, Factors>>,
     cache_grid: Res<CacheGrid>,
+    mut debug_times: ResMut<DebugTimes>,
 ) {
+    let start = Instant::now();
     for (id_a, trans_a, type_a) in creatures.iter() {
         let factors_a = all_factors.get(type_a).unwrap();
         let mut closest_target = (0.0, None);
@@ -324,6 +337,11 @@ fn chase_system(
             apply_force_event_handler.send(ApplyForceEvent(id_a, chase_direction, factors_a.chase));
         }
     }
+    debug_times
+        .0
+        .entry("chase".into())
+        .or_insert(Vec::with_capacity(10000))
+        .push(start.elapsed().as_micros());
 }
 
 fn flocking_system(
@@ -331,74 +349,117 @@ fn flocking_system(
     mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
     all_factors: Res<HashMap<CreatureType, Factors>>,
     cache_grid: Res<CacheGrid>,
+    mut debug_times: ResMut<DebugTimes>,
 ) {
-    for (id_a, _dir_a, trans_a, sprite_a, type_a) in creatures.iter() {
-        let factors_a = all_factors.get(type_a).unwrap();
-        let pos_a = trans_a.translation.xy();
+    let start = std::time::Instant::now();
+    let (sender, receiver) = std::sync::mpsc::channel();
 
-        let mut average_position = Vec2::ZERO; // Cohesion
-        let mut average_direction = Vec2::ZERO; // Alignment
-        let mut average_close_position = Vec2::ZERO; // Separation
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    let tx = sender.clone();
+    let creatures = &creatures;
+    let all_factors = all_factors.as_ref();
+    pool.scope(move |scope| {
+        for (id_a, _dir_a, trans_a, sprite_a, type_a) in creatures.iter() {
+            let tx = tx.clone();
+            let creatures_arc = Arc::new(creatures);
+            let factors_a_arc = Arc::new(all_factors.get(type_a).unwrap());
 
-        let mut vision_count = 0;
-        let mut half_vision_count = 0;
+            let pos_a = trans_a.translation.xy();
+            let pos_a_arc = Arc::new(pos_a);
 
-        let possibles = cache_grid.get_possibles(pos_a, factors_a.vision);
-        for id_b in possibles {
-            if let Ok((id_b, dir_b, trans_b, _sprite_b, type_b)) = creatures.get(id_b) {
-                if id_a == id_b || type_a != type_b {
-                    continue;
-                }
-                let pos_b = trans_b.translation.xy();
-                let distance = pos_a.distance(pos_b);
-                if distance < factors_a.vision {
-                    vision_count += 1;
-                    average_position += pos_b;
-                    average_direction += dir_b.0;
-                }
-                if distance < factors_a.vision / 2.0 {
-                    half_vision_count += 1;
-                    average_close_position += pos_b;
-                }
-                if let Some(size) = sprite_a.custom_size {
-                    if distance < size.x * 2.0 {
-                        let away_direction =
-                            (trans_a.translation.xy() - trans_b.translation.xy()).normalize();
-                        apply_force_event_handler.send(ApplyForceEvent(
-                            id_a,
-                            away_direction,
-                            factors_a.collision_avoidance,
-                        ));
+            let possibles = cache_grid.get_possibles(pos_a, factors_a_arc.vision);
+            let possibles_arc = Arc::new(possibles);
+
+            scope.spawn(move |_| {
+                let mut average_position = Vec2::ZERO; // Cohesion
+                let mut average_direction = Vec2::ZERO; // Alignment
+                let mut average_close_position = Vec2::ZERO; // Separation
+
+                let mut vision_count = 0;
+                let mut half_vision_count = 0;
+
+                for id_b in possibles_arc.iter() {
+                    let id_b = *id_b;
+                    if let Ok((id_b, dir_b, trans_b, _sprite_b, type_b)) = creatures_arc.get(id_b) {
+                        if id_a == id_b || type_a != type_b {
+                            continue;
+                        }
+                        let pos_b = trans_b.translation.xy();
+                        let distance = pos_a_arc.distance(pos_b);
+                        if distance < factors_a_arc.vision {
+                            vision_count += 1;
+                            average_position += pos_b;
+                            average_direction += dir_b.0;
+                        }
+                        if distance < factors_a_arc.vision / 2.0 {
+                            half_vision_count += 1;
+                            average_close_position += pos_b;
+                        }
+                        if let Some(size) = sprite_a.custom_size {
+                            if distance < size.x * 2.0 {
+                                let away_direction = (trans_a.translation.xy()
+                                    - trans_b.translation.xy())
+                                .normalize();
+                                tx.send(Some(ApplyForceEvent(
+                                    id_a,
+                                    away_direction,
+                                    factors_a_arc.collision_avoidance,
+                                )))
+                                .unwrap();
+                            }
+                        }
                     }
                 }
-            }
-        }
 
-        if vision_count > 0 {
-            average_position /= vision_count as f32;
-            average_direction /= vision_count as f32;
-            let cohesion_force = (average_position - trans_a.translation.xy()).normalize();
-            apply_force_event_handler.send(ApplyForceEvent(
-                id_a,
-                cohesion_force,
-                factors_a.cohesion,
-            ));
-            apply_force_event_handler.send(ApplyForceEvent(
-                id_a,
-                average_direction.normalize(),
-                factors_a.alignment,
-            ));
+                if vision_count > 0 {
+                    average_position /= vision_count as f32;
+                    average_direction /= vision_count as f32;
+                    let cohesion_force = (average_position - trans_a.translation.xy()).normalize();
+                    tx.send(Some(ApplyForceEvent(
+                        id_a,
+                        cohesion_force,
+                        factors_a_arc.cohesion,
+                    )))
+                    .unwrap();
+                    tx.send(Some(ApplyForceEvent(
+                        id_a,
+                        average_direction.normalize(),
+                        factors_a_arc.alignment,
+                    )))
+                    .unwrap();
+                }
+                if half_vision_count > 0 {
+                    average_close_position /= half_vision_count as f32;
+                    let separation_force =
+                        (trans_a.translation.xy() - average_close_position).normalize();
+                    tx.send(Some(ApplyForceEvent(
+                        id_a,
+                        separation_force,
+                        factors_a_arc.separation,
+                    )))
+                    .unwrap();
+                }
+            });
         }
-        if half_vision_count > 0 {
-            average_close_position /= half_vision_count as f32;
-            let separation_force = (trans_a.translation.xy() - average_close_position).normalize();
-            apply_force_event_handler.send(ApplyForceEvent(
-                id_a,
-                separation_force,
-                factors_a.separation,
-            ));
+    });
+    drop(pool);
+    sender.send(None).unwrap();
+
+    for msg in receiver {
+        match msg {
+            Some(apply_force_event) => apply_force_event_handler.send(apply_force_event),
+            None => break,
         }
     }
+
+    debug_times
+        .0
+        .entry("flocking".into())
+        .or_insert(Vec::with_capacity(10000))
+        .push(start.elapsed().as_micros());
 }
 
 fn update_factors_system(
@@ -439,12 +500,35 @@ fn handle_input_system(keys: Res<Input<KeyCode>>, mut sim_state: ResMut<State<Si
 }
 
 fn cache_grid_update_system(
-    creature_query: Query<(Entity, &Transform), Changed<Transform>>,
+    creature_query: Query<(Entity, &Transform, &CreatureType), Changed<Transform>>,
     mut cache_grid: ResMut<CacheGrid>,
+    mut debug_times: ResMut<DebugTimes>,
 ) {
-    for (entity, transform) in creature_query.iter() {
+    let start = Instant::now();
+    for (entity, transform, _creature_type) in creature_query.iter() {
         cache_grid.update(entity, transform.translation.xy());
     }
+    debug_times
+        .0
+        .entry("cache".into())
+        .or_insert(Vec::with_capacity(10000))
+        .push(start.elapsed().as_micros());
+}
+
+fn debug_time_system(debug_times: Res<DebugTimes>) {
+    if debug_times.0.keys().len() <= 0 {
+        return;
+    }
+    println!();
+    let mut time_info: Vec<(&String, &Vec<u128>)> = debug_times.0.iter().collect();
+    time_info.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    time_info.iter().for_each(|(system, times)| {
+        println!(
+            "{}: {}",
+            system,
+            times.iter().sum::<u128>() as f32 / times.len() as f32
+        );
+    });
 }
 
 pub struct BoidsPlugin {
@@ -530,6 +614,7 @@ impl Plugin for BoidsPlugin {
             .insert_resource(CacheGrid {
                 ..Default::default()
             })
+            .insert_resource(DebugTimes::default())
             .add_event::<ApplyForceEvent>()
             .add_state(SimState::Running);
 
@@ -546,41 +631,47 @@ impl Plugin for BoidsPlugin {
         app.add_system_set(
             SystemSet::on_update(SimState::Running)
                 .label("movement")
+                .before("caching")
                 .with_system(move_system)
-                .with_system(wrap_borders_system)
-                .before("caching"),
+                .with_system(wrap_borders_system),
         );
 
         app.add_system_set(
             SystemSet::on_update(SimState::Running)
                 .label("caching")
-                .with_system(cache_grid_update_system)
-                .after("movement"),
+                .after("movement")
+                .with_system(cache_grid_update_system),
         );
 
         app.add_system_set(
             SystemSet::on_update(SimState::Running)
                 .label("flocking")
                 .label("force_adding")
-                .with_system(flocking_system)
-                .after("caching"),
+                .after("caching")
+                .with_system(flocking_system),
         );
 
         app.add_system_set(
             SystemSet::on_update(SimState::Running)
                 .label("interactions")
                 .label("force_adding")
+                .after("caching")
                 .with_system(scare_system)
-                .with_system(chase_system)
-                .after("caching"),
+                .with_system(chase_system),
         );
 
         app.add_system_set(
             SystemSet::on_update(SimState::Running)
-                .with_system(apply_force_event_system)
+                .after("force_adding")
+                .with_system(apply_force_event_system),
+        );
+
+        app.add_system_set(
+            SystemSet::on_update(SimState::Running)
+                .label("cleanup")
                 .after("force_adding"),
         );
 
-        app.add_system_set(SystemSet::on_update(DebugState::On));
+        app.add_system_set(SystemSet::on_update(DebugState::On).with_system(debug_time_system));
     }
 }

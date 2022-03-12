@@ -2,6 +2,7 @@ use bevy::{
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     prelude::*,
 };
+// use bevy_mod_debugdump::print_schedule;
 
 use std::time::Duration;
 mod boids;
@@ -33,7 +34,7 @@ fn handle_input_presses_system(
     keys: Res<Input<KeyCode>>,
     mut debug_state: ResMut<State<DebugState>>,
 ) {
-    if keys.just_pressed(KeyCode::D) && keys.just_pressed(KeyCode::LShift) {
+    if keys.just_pressed(KeyCode::D) && keys.pressed(KeyCode::LShift) {
         let current_sim_state = debug_state.current();
         let new_debug_state = match current_sim_state {
             DebugState::On => DebugState::Off,
@@ -76,10 +77,9 @@ fn main() {
             ..Default::default()
         });
 
+    // print_schedule(&mut app);
     app.run();
 }
 
 // TODO:
-// - Make live-adjustable factors
 // - Make flocking more streamlined
-// - Have flocking groups
