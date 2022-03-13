@@ -1,11 +1,12 @@
 use bevy::{
+    input::{mouse::MouseButtonInput, ElementState},
     math::Vec3Swizzles,
     prelude::*,
     utils::{HashMap, HashSet},
 };
 use rand::prelude::*;
 
-use crate::DebugState;
+use crate::{Cursor, DebugState};
 
 pub const POPULATION_A: usize = 800;
 pub const POPULATION_B: usize = 100;
@@ -33,6 +34,38 @@ pub struct Factors {
     pub chase: f32,
     pub scared_of: HashSet<CreatureType>,
     pub will_chase: HashSet<CreatureType>,
+}
+
+#[derive(Debug)]
+pub struct SpawnProperties {
+    pub amount: usize,
+    pub radius: f32,
+    pub creature_type: CreatureType,
+}
+
+impl Default for SpawnProperties {
+    fn default() -> Self {
+        SpawnProperties {
+            amount: 10,
+            radius: 10.0,
+            creature_type: CreatureType::A,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct KillProperties {
+    pub radius: f32,
+    pub creature_types: HashSet<CreatureType>,
+}
+
+impl Default for KillProperties {
+    fn default() -> Self {
+        KillProperties {
+            radius: 100.0,
+            creature_types: CreatureType::all().into_iter().collect(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Copy, Component, Eq, Hash)]
@@ -145,21 +178,16 @@ impl CacheGrid {
 }
 
 fn spawn_creature(
-    rng: &mut ThreadRng,
-    commands: &mut Commands,
+    x: f32,
+    y: f32,
+    direction_vector: Vec2,
     creature_type: CreatureType,
     all_factors: &HashMap<CreatureType, Factors>,
-    screen_width: f32,
-    screen_height: f32,
+    commands: &mut Commands,
 ) {
-    let x = rng.gen_range(-screen_width / 2.0..screen_width / 2.0);
-    let y = rng.gen_range(-screen_height / 2.0..screen_height / 2.0);
-    let direction = Direction(
-        Vec2::new(rng.gen::<f32>() * 2.0 - 1.0, rng.gen::<f32>() * 2.0 - 1.0).normalize(),
-    );
     let factors = all_factors.get(&creature_type).unwrap();
-    let mut creature_commands = commands.spawn();
-    creature_commands
+    commands
+        .spawn()
         .insert_bundle(SpriteBundle {
             sprite: Sprite {
                 color: factors.color,
@@ -168,13 +196,58 @@ fn spawn_creature(
             },
             transform: Transform {
                 translation: Vec3::new(x, y, 0.0),
-                rotation: Quat::from_rotation_z(direction.0.y.atan2(direction.0.x)),
+                rotation: Quat::from_rotation_z(direction_vector.y.atan2(direction_vector.x)),
                 ..Transform::default()
             },
             ..SpriteBundle::default()
         })
-        .insert(direction)
+        .insert(Direction(direction_vector))
         .insert(creature_type);
+}
+
+fn spawn_creature_randomly(
+    rng: Option<&mut ThreadRng>,
+    commands: &mut Commands,
+    creature_type: CreatureType,
+    all_factors: &HashMap<CreatureType, Factors>,
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+) {
+    let mut temp_rng;
+    let rng = match rng {
+        Some(rng) => rng,
+        None => {
+            temp_rng = rand::thread_rng();
+            &mut temp_rng
+        }
+    };
+    let x = rng.gen_range(min_x..=max_x);
+    let y = rng.gen_range(min_y..=max_y);
+    let direction_vector =
+        Vec2::new(rng.gen::<f32>() * 2.0 - 1.0, rng.gen::<f32>() * 2.0 - 1.0).normalize();
+    spawn_creature(x, y, direction_vector, creature_type, all_factors, commands);
+}
+
+fn spawn_creature_randomly_on_screen(
+    rng: Option<&mut ThreadRng>,
+    commands: &mut Commands,
+    creature_type: CreatureType,
+    all_factors: &HashMap<CreatureType, Factors>,
+    screen_width: f32,
+    screen_height: f32,
+) {
+    spawn_creature_randomly(
+        rng,
+        commands,
+        creature_type,
+        all_factors,
+        -screen_width / 2.0,
+        screen_width / 2.0,
+        -screen_height / 2.0,
+        screen_height / 2.0,
+    );
 }
 
 fn setup_creatures(
@@ -189,8 +262,8 @@ fn setup_creatures(
     let mut rng = rand::thread_rng();
     let all_factors = all_factors.as_ref();
     for _ in 0..POPULATION_A {
-        spawn_creature(
-            &mut rng,
+        spawn_creature_randomly_on_screen(
+            Some(&mut rng),
             &mut commands,
             CreatureType::A,
             all_factors,
@@ -199,8 +272,8 @@ fn setup_creatures(
         );
     }
     for _ in 0..POPULATION_B {
-        spawn_creature(
-            &mut rng,
+        spawn_creature_randomly_on_screen(
+            Some(&mut rng),
             &mut commands,
             CreatureType::B,
             all_factors,
@@ -209,8 +282,8 @@ fn setup_creatures(
         );
     }
     for _ in 0..POPULATION_C {
-        spawn_creature(
-            &mut rng,
+        spawn_creature_randomly_on_screen(
+            Some(&mut rng),
             &mut commands,
             CreatureType::C,
             all_factors,
@@ -447,6 +520,69 @@ fn cache_grid_update_system(
     }
 }
 
+fn spawn_system(
+    cursor: Res<Cursor>,
+    mut commands: Commands,
+    keys: Res<Input<KeyCode>>,
+    spawn_properties: Res<SpawnProperties>,
+    all_factors: Res<HashMap<CreatureType, Factors>>,
+    mut mouse_button_events: EventReader<MouseButtonInput>,
+) {
+    for event in mouse_button_events.iter() {
+        if event.button != MouseButton::Left
+            || event.state != ElementState::Pressed
+            || !keys.pressed(KeyCode::LShift)
+        {
+            continue;
+        }
+        let mut rng = rand::thread_rng();
+        for _ in 0..spawn_properties.amount {
+            spawn_creature_randomly(
+                Some(&mut rng),
+                &mut commands,
+                spawn_properties.creature_type,
+                all_factors.as_ref(),
+                cursor.position.x - spawn_properties.radius,
+                cursor.position.x + spawn_properties.radius,
+                cursor.position.y - spawn_properties.radius,
+                cursor.position.y + spawn_properties.radius,
+            );
+        }
+    }
+}
+fn kill_system(
+    cursor: Res<Cursor>,
+    mut commands: Commands,
+    keys: Res<Input<KeyCode>>,
+    kill_properties: Res<KillProperties>,
+    creatures_query: Query<(Entity, &Transform, &CreatureType)>,
+    mut mouse_button_events: EventReader<MouseButtonInput>,
+) {
+    for event in mouse_button_events.iter() {
+        if event.button != MouseButton::Left
+            || event.state != ElementState::Pressed
+            || !keys.pressed(KeyCode::LControl)
+        {
+            continue;
+        }
+        let min_x = cursor.position.x - kill_properties.radius;
+        let max_x = cursor.position.x + kill_properties.radius;
+        let min_y = cursor.position.y - kill_properties.radius;
+        let max_y = cursor.position.y + kill_properties.radius;
+        for (id, transform, creature_type) in creatures_query.iter() {
+            if transform.translation.x < min_x
+                || transform.translation.x > max_x
+                || transform.translation.y < min_y
+                || transform.translation.y > max_y
+                || !kill_properties.creature_types.contains(&creature_type)
+            {
+                continue;
+            }
+            commands.entity(id).despawn();
+        }
+    }
+}
+
 pub struct BoidsPlugin {
     initial_factors: HashMap<CreatureType, Factors>,
 }
@@ -527,9 +663,9 @@ impl Plugin for BoidsPlugin {
     fn build(&self, app: &mut App) {
         // Insert Resources
         app.insert_resource(self.initial_factors.clone())
-            .insert_resource(CacheGrid {
-                ..Default::default()
-            })
+            .insert_resource(CacheGrid::default())
+            .insert_resource(SpawnProperties::default())
+            .insert_resource(KillProperties::default())
             .add_event::<ApplyForceEvent>()
             .add_state(SimState::Running);
 
@@ -540,7 +676,9 @@ impl Plugin for BoidsPlugin {
             SystemSet::new()
                 .label("sim_updates")
                 .with_system(update_factors_system)
-                .with_system(handle_input_system),
+                .with_system(handle_input_system)
+                .with_system(kill_system)
+                .with_system(spawn_system),
         );
 
         app.add_system_set(
