@@ -3,7 +3,10 @@ use bevy::{
     prelude::*,
     utils::HashMap,
 };
-use bevy_egui::{egui, EguiContext, EguiPlugin};
+use bevy_egui::{
+    egui::{self, color_picker::color_edit_button_rgb},
+    EguiContext, EguiPlugin,
+};
 
 use crate::{
     boids::{KillProperties, SpawnProperties},
@@ -170,13 +173,11 @@ fn factors_system(
                 ui.collapsing(
                     format!("Creature Type {} Factors", creature_type.to_string()),
                     |ui| {
-                        ui.collapsing("Color", |ui| {
-                            ui.radio_value(&mut factors.color, Color::RED, "Red");
-                            ui.radio_value(&mut factors.color, Color::GREEN, "Green");
-                            ui.radio_value(&mut factors.color, Color::rgb(0.2, 0.5, 1.0), "Blue");
-                            ui.radio_value(&mut factors.color, Color::WHITE, "White");
-                            ui.radio_value(&mut factors.color, Color::GOLD, "Gold");
-                        });
+                        ui.label("Color");
+                        let mut color = [factors.color.r(), factors.color.g(), factors.color.b()];
+                        color_edit_button_rgb(ui, &mut color);
+                        factors.color = color.into();
+
                         ui.add(egui::Slider::new(&mut factors.speed, 20.0..=200.0).text("Speed"));
                         ui.add(
                             egui::Slider::new(&mut factors.alignment, 0.0..=20.0).text("Alignment"),
