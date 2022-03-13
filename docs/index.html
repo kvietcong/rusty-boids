@@ -11,17 +11,29 @@
 
         const afterSimAppears = () => {
             const container = document.getElementsByTagName("main")[0];
-            console.log(container)
 
             const description = document.createElement("p");
             description.innerHTML = `
-                This simulation was made with <a href=\"https://www.rust-lang.org/\">Rust</a>,
-                <a href=\"https://webassembly.org/\">WebAssembly</a>, and the
-                <a href=\"https://bevyengine.org/\">Bevy Game Engine</a>.
-                If the simulation is laggy, please turn on hardware acceleration!`;
+                This simulation was made with <a href=\"https://www.rust-lang.org/\" target="blank">Rust</a>
+                and the <a href=\"https://bevyengine.org/\" target="blank">Bevy Game Engine</a>.
+
+                <br>
+
+                There is no JavaScript for the simulation itself! Rust compiles my program
+                into <a href=\"https://webassembly.org/\" target="blank">WebAssembly</a>
+                which is a binary instruction format that acts as "Assembly for The Browser".
+                Take a look at the code on <a href="https://github.com/kvietcong/rusty-boids" target="blank">GitHub</a>!
+
+                <br>
+
+                If the simulation is laggy, please turn on hardware acceleration
+                as the simulation performance heavily relies on it!`;
             container.appendChild(description);
 
             const simulation = document.getElementsByTagName("canvas")[0];
+            simulation.focus();
+            simulation.addEventListener("wheel", event =>
+                window.scrollBy({top: event.deltaY, left: event.deltaX, behavior: "auto"}));
             document.body.removeChild(simulation);
             container.appendChild(simulation);
         };
@@ -36,16 +48,40 @@
     </script>
     <style>
         * {
+            background-color: black;
+            color: white;
             margin: 0;
             padding: 0;
             box-sizing: border-box;
+            font-family: "Arial", sans-serif;
         }
 
         main {
             display: flex;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
+            /* justify-content: center; */
+        }
+
+        h1 {
+            font-size: 2em;
+            padding: 15px;
+        }
+
+        p {
+            font-size: 1.1em;
+            text-align: center;
+            min-width: 500px;
+            max-width: 900px;
+            padding: 10px 0 30px 0;
+        }
+
+        canvas {
+            border: 1px solid white;
+            padding: 1px;
+            border-radius: 10px;
+            margin: auto;
+            margin-bottom: 50px;
         }
     </style>
 </head>
