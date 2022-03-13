@@ -5,7 +5,10 @@ use bevy::{
 };
 use bevy_egui::{egui, EguiContext, EguiPlugin};
 
-use crate::{CreatureType, Factors};
+use crate::{
+    boids::{KillProperties, SpawnProperties},
+    CreatureType, Factors,
+};
 
 #[derive(Component)]
 struct FPSText;
@@ -68,12 +71,98 @@ fn fps_text_update_system(
     }
 }
 
-fn egui_system(
+fn settings_system(
+    keys: Res<Input<KeyCode>>,
+    mut windows: ResMut<Windows>,
+    mut egui_context: ResMut<EguiContext>,
+    mut kill_properties: ResMut<KillProperties>,
+    mut spawn_properties: ResMut<SpawnProperties>,
+) {
+    egui::Window::new("Settings")
+        .anchor(egui::Align2::LEFT_BOTTOM, [10.0, -10.0])
+        .vscroll(true)
+        .show(egui_context.ctx_mut(), |ui| {
+            if cfg!(target_arch = "wasm32") {
+                ui.label(concat!(
+                    "LShift and LCtrl detection are a little buggy on the web. ",
+                    "The sim can keep keys pressed when you click out. ",
+                    "Just click Ctrl and Shift while focused on the sim to reset input."
+                ));
+            }
+            ui.collapsing("Spawning (LShift+Click to Spawn)", |ui| {
+                ui.add(egui::Slider::new(&mut spawn_properties.radius, 5.0..=500.0).text("Radius"));
+                ui.add(
+                    egui::Slider::new(&mut spawn_properties.amount, 0..=100)
+                        .text("Amount Per Click"),
+                );
+                egui::CollapsingHeader::new(format!(
+                    "Type {}",
+                    spawn_properties.creature_type.to_string()
+                ))
+                .default_open(true)
+                .show(ui, |ui| {
+                    for creature_type in CreatureType::all() {
+                        ui.radio_value(
+                            &mut spawn_properties.creature_type,
+                            creature_type,
+                            creature_type.to_string(),
+                        );
+                    }
+                });
+            });
+
+            ui.collapsing("Killing (LCtrl+Click to Kill)", |ui| {
+                ui.add(egui::Slider::new(&mut kill_properties.radius, 5.0..=500.0).text("Radius"));
+                egui::CollapsingHeader::new("Types Impacted")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for creature_type in CreatureType::all() {
+                            let text;
+                            let is_killed = kill_properties.creature_types.contains(&creature_type);
+                            if is_killed {
+                                text = format!("Will Kill {}", creature_type.to_string());
+                            } else {
+                                text = format!("Will Not Kill {}", creature_type.to_string());
+                            }
+                            if ui.button(text).clicked() {
+                                if is_killed {
+                                    kill_properties.creature_types.remove(&creature_type);
+                                } else {
+                                    kill_properties.creature_types.insert(creature_type);
+                                }
+                            }
+                        }
+                    });
+            });
+
+            let window = windows.get_primary_mut().unwrap();
+            let is_shift = keys.pressed(KeyCode::LShift);
+            let is_ctrl = keys.pressed(KeyCode::LControl);
+            ui.collapsing("Screen", |ui| {
+                ui.label(
+                    "Click to Increase. LCtrl+Click to Decrease. LShift+<> to increase change.",
+                );
+                let change = if is_shift { 500 } else { 50 };
+                let change = if is_ctrl { -change } else { change };
+                let change = change as f32;
+                if ui.button("Width").clicked() {
+                    let new_width = (window.width() + change).max(500.0);
+                    window.set_resolution(new_width, window.height());
+                }
+                if ui.button("Height").clicked() {
+                    let new_height = (window.height() + change).max(500.0);
+                    window.set_resolution(window.width(), new_height);
+                }
+            });
+        });
+}
+
+fn factors_system(
     mut egui_context: ResMut<EguiContext>,
     mut all_factors: ResMut<HashMap<CreatureType, Factors>>,
 ) {
     egui::Window::new("Edit Factors")
-        .anchor(egui::Align2::RIGHT_BOTTOM, [-5.0, -5.0])
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-10.0, -10.0])
         .vscroll(true)
         .show(egui_context.ctx_mut(), |ui| {
             for creature_type in CreatureType::all() {
@@ -167,6 +256,6 @@ impl Plugin for UiPlugin {
             .add_startup_system(fps_text_setup)
             .add_system(fps_text_update_system);
 
-        app.add_system(egui_system);
+        app.add_system(factors_system).add_system(settings_system);
     }
 }
