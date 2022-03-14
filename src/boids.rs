@@ -1,16 +1,19 @@
+use std::sync::mpsc;
+
 use bevy::{
     input::{mouse::MouseButtonInput, ElementState},
     math::Vec3Swizzles,
     prelude::*,
+    tasks::ComputeTaskPool,
     utils::{HashMap, HashSet},
 };
 use rand::prelude::*;
 
-use crate::{Cursor, DebugState};
+use crate::{Cursor, DebugState, IS_WASM};
 
-pub const POPULATION_A: usize = 800;
-pub const POPULATION_B: usize = 100;
-pub const POPULATION_C: usize = 100;
+pub const POPULATION_A: usize = if IS_WASM { 600 } else { 1600 };
+pub const POPULATION_B: usize = if IS_WASM { 50 } else { 200 };
+pub const POPULATION_C: usize = if IS_WASM { 50 } else { 200 };
 
 pub const CHUNK_RESOLUTION: usize = 20;
 
@@ -120,21 +123,21 @@ struct CacheGrid {
 }
 
 impl CacheGrid {
-    fn update(&mut self, id: Entity, pos: Vec2) {
+    fn update_entity(&mut self, entity: Entity, pos: Vec2) {
         let x = pos.x;
         let y = pos.y;
 
         let i = (y / CHUNK_RESOLUTION as f32) as i8;
         let j = (x / CHUNK_RESOLUTION as f32) as i8;
 
-        if let Some((old_i, old_j)) = self.associations.get(&id) {
+        if let Some((old_i, old_j)) = self.associations.get(&entity) {
             let old_i = *old_i;
             let old_j = *old_j;
             if i == old_i && j == old_j {
                 return;
             }
             if let Some(set) = self.grid.get_mut(&(old_i, old_j)) {
-                set.remove(&id);
+                set.remove(&entity);
                 if set.is_empty() {
                     self.grid.remove(&(old_i, old_j));
                 }
@@ -144,11 +147,11 @@ impl CacheGrid {
         if !self.grid.contains_key(&(i, j)) {
             self.grid.insert((i, j), HashSet::default());
         }
-        self.grid.get_mut(&(i, j)).unwrap().insert(id);
-        self.associations.insert(id, (i, j));
+        self.grid.get_mut(&(i, j)).unwrap().insert(entity);
+        self.associations.insert(entity, (i, j));
     }
 
-    fn get_possibles(&self, position: Vec2, radius: f32) -> Vec<Entity> {
+    fn get_nearby_entities(&self, position: Vec2, radius: f32) -> Vec<Entity> {
         let mut result = vec![];
 
         let x = position.x;
@@ -324,37 +327,161 @@ fn wrap_borders_system(mut query: Query<&mut Transform>, windows: ResMut<Windows
     }
 }
 
+fn parallel_scare_system(
+    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+    creatures: Query<(Entity, &Transform, &CreatureType)>,
+    all_factors: Res<HashMap<CreatureType, Factors>>,
+    compute_task_pool: Res<ComputeTaskPool>,
+    cache_grid: Res<CacheGrid>,
+) {
+    let creature_vec = creatures.iter().collect::<Vec<_>>();
+    let creatures_per_thread = creature_vec.len() / compute_task_pool.0.thread_num();
+
+    let cache_grid = &cache_grid;
+    let creatures = &creatures;
+    let all_factors = &all_factors;
+
+    compute_task_pool.scope(|scope| {
+        let (sender, receiver) = mpsc::channel();
+
+        for chunk in creature_vec.chunks(creatures_per_thread) {
+            let sender = sender.clone();
+            scope.spawn(async move {
+                for (entity_a, transform_a, type_a) in chunk {
+                    let entity_a = *entity_a;
+                    let position_a = transform_a.translation.xy();
+                    let factors = all_factors.get(type_a).unwrap();
+                    for entity_b in cache_grid.get_nearby_entities(position_a, factors.vision) {
+                        if entity_b == entity_a {
+                            continue;
+                        }
+                        let (position_b, type_b) = match creatures.get(entity_b) {
+                            Ok(creature) => (creature.1.translation.xy(), creature.2),
+                            Err(_) => continue,
+                        };
+                        if !factors.scared_of.contains(&type_b) {
+                            continue;
+                        }
+                        if position_a.distance(position_b) <= factors.vision {
+                            let run_direction = (position_a - position_b).normalize();
+                            sender
+                                .send(ApplyForceEvent(entity_a, run_direction, factors.scare))
+                                .unwrap();
+                        }
+                    }
+                }
+            });
+        }
+
+        drop(sender);
+        receiver
+            .iter()
+            .for_each(|event| apply_force_event_handler.send(event));
+    });
+}
+
 fn scare_system(
     mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
     creatures: Query<(Entity, &Transform, &CreatureType)>,
     all_factors: Res<HashMap<CreatureType, Factors>>,
     cache_grid: Res<CacheGrid>,
 ) {
-    for (id_a, trans_a, type_a) in creatures.iter() {
-        let factors_a = all_factors.get(type_a).unwrap();
-        let possibles = cache_grid.get_possibles(trans_a.translation.xy(), factors_a.vision);
-        for id_b in possibles {
-            let trans_b;
-            if let Ok((_, transform, type_b)) = creatures.get(id_b) {
-                if id_b == id_a || !factors_a.scared_of.contains(type_b) {
-                    continue;
-                }
-                trans_b = transform;
-            } else {
+    // I use `for_each` because it's faster than `iter` according to the Bevy docs
+    creatures.for_each(|(entity_a, transform_a, type_a)| {
+        let position_a = transform_a.translation.xy();
+        let factors = all_factors.get(type_a).unwrap();
+        for entity_b in cache_grid.get_nearby_entities(position_a, factors.vision) {
+            if entity_b == entity_a {
                 continue;
             }
-            let distance = trans_a.translation.distance(trans_b.translation);
-            if distance < factors_a.vision {
-                let run_direction =
-                    (trans_a.translation.xy() - trans_b.translation.xy()).normalize();
+            let (position_b, type_b) = match creatures.get(entity_b) {
+                Ok(creature) => (creature.1.translation.xy(), creature.2),
+                Err(_) => continue,
+            };
+            if !factors.scared_of.contains(&type_b) {
+                continue;
+            }
+            let distance = position_a.distance(position_b);
+            if distance <= factors.vision {
+                let run_direction = (position_a - position_b).normalize();
                 apply_force_event_handler.send(ApplyForceEvent(
-                    id_a,
+                    entity_a,
                     run_direction,
-                    factors_a.scare,
+                    factors.scare,
                 ));
             }
         }
-    }
+    });
+}
+
+fn parallel_chase_system(
+    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+    creatures: Query<(Entity, &Transform, &CreatureType)>,
+    all_factors: Res<HashMap<CreatureType, Factors>>,
+    compute_task_pool: Res<ComputeTaskPool>,
+    cache_grid: Res<CacheGrid>,
+) {
+    let creature_vec = creatures.iter().collect::<Vec<_>>();
+    let creatures_per_thread = creature_vec.len() / compute_task_pool.0.thread_num();
+
+    let cache_grid = &cache_grid;
+    let creatures = &creatures;
+    let all_factors = &all_factors;
+
+    compute_task_pool.scope(|scope| {
+        let (sender, receiver) = mpsc::channel();
+
+        for chunk in creature_vec.chunks(creatures_per_thread) {
+            let sender = sender.clone();
+            scope.spawn(async move {
+                for (entity_a, transform_a, type_a) in chunk {
+                    let id_a = *entity_a;
+                    let position_a = transform_a.translation.xy();
+                    let factors = all_factors.get(type_a).unwrap();
+                    let mut closest_target = (0.0, None);
+                    for entity_b in cache_grid.get_nearby_entities(position_a, factors.vision) {
+                        if id_a == entity_b {
+                            continue;
+                        }
+                        let (position_b, type_b) = match creatures.get(entity_b) {
+                            Ok(creature) => (creature.1.translation.xy(), creature.2),
+                            Err(_) => continue,
+                        };
+                        if !factors.will_chase.contains(&type_b) {
+                            continue;
+                        }
+                        let distance = position_a.distance(position_b);
+                        if distance <= factors.vision {
+                            closest_target = match closest_target {
+                                (_, None) => (distance, Some(position_b)),
+                                (old_distance, Some(_)) => {
+                                    if old_distance > distance {
+                                        (distance, Some(position_b))
+                                    } else {
+                                        closest_target
+                                    }
+                                }
+                            };
+                        }
+                    }
+
+                    let closest_position = match closest_target {
+                        (_, Some(position)) => position,
+                        (_, None) => continue,
+                    };
+                    let chase_direction = (closest_position - position_a).normalize();
+                    sender
+                        .send(ApplyForceEvent(id_a, chase_direction, factors.chase))
+                        .unwrap();
+                }
+            });
+        }
+
+        drop(sender);
+        receiver
+            .iter()
+            .for_each(|event| apply_force_event_handler.send(event));
+    });
 }
 
 fn chase_system(
@@ -363,27 +490,26 @@ fn chase_system(
     all_factors: Res<HashMap<CreatureType, Factors>>,
     cache_grid: Res<CacheGrid>,
 ) {
-    for (id_a, trans_a, type_a) in creatures.iter() {
-        let factors_a = all_factors.get(type_a).unwrap();
+    creatures.for_each(|(entity_a, transform_a, type_a)| {
+        let position_a = transform_a.translation.xy();
+        let factors = all_factors.get(type_a).unwrap();
         let mut closest_target = (0.0, None);
-        let possibles = cache_grid.get_possibles(trans_a.translation.xy(), factors_a.vision);
-        for id_b in possibles {
-            let trans_b;
-            if let Ok((_, trans, type_b)) = creatures.get(id_b) {
-                if id_a == id_b || !factors_a.will_chase.contains(type_b) {
-                    continue;
-                }
-                trans_b = trans;
-            } else {
+
+        for entity_b in cache_grid.get_nearby_entities(position_a, factors.vision) {
+            let (position_b, type_b) = match creatures.get(entity_b) {
+                Ok(creature) => (creature.1.translation.xy(), creature.2),
+                Err(_) => continue,
+            };
+            if !factors.will_chase.contains(type_b) {
                 continue;
             }
-            let distance = trans_a.translation.distance(trans_b.translation);
-            if distance < factors_a.vision {
+            let distance = position_a.distance(position_b);
+            if distance <= factors.vision {
                 closest_target = match closest_target {
-                    (_, None) => (distance, Some(trans_b)),
+                    (_, None) => (distance, Some(position_b)),
                     (old_distance, Some(_)) => {
                         if old_distance > distance {
-                            (distance, Some(trans_b))
+                            (distance, Some(position_b))
                         } else {
                             closest_target
                         }
@@ -391,12 +517,124 @@ fn chase_system(
                 };
             }
         }
-        if let (_, Some(closest_trans)) = closest_target {
-            let chase_direction =
-                (closest_trans.translation.xy() - trans_a.translation.xy()).normalize();
-            apply_force_event_handler.send(ApplyForceEvent(id_a, chase_direction, factors_a.chase));
+
+        let closest_position = match closest_target {
+            (_, Some(position)) => position,
+            (_, None) => return,
+        };
+        let chase_direction = (closest_position - position_a).normalize();
+        apply_force_event_handler.send(ApplyForceEvent(entity_a, chase_direction, factors.chase));
+    });
+}
+
+fn parallel_flocking_system(
+    creatures: Query<(Entity, &Direction, &Transform, &Sprite, &CreatureType)>,
+    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+    all_factors: Res<HashMap<CreatureType, Factors>>,
+    compute_task_pool: Res<ComputeTaskPool>,
+    cache_grid: Res<CacheGrid>,
+) {
+    let creature_vec = creatures.iter().collect::<Vec<_>>();
+    let creatures_per_thread = creature_vec.len() / compute_task_pool.0.thread_num();
+
+    let cache_grid = &cache_grid;
+    let creatures = &creatures;
+    let all_factors = &all_factors;
+
+    compute_task_pool.scope(|scope| {
+        let (sender, receiver) = mpsc::channel();
+
+        for chunk in creature_vec.chunks(creatures_per_thread) {
+            let sender = sender.clone();
+            scope.spawn(async move {
+                for (entity_a, _, transform_a, sprite_a, type_a) in chunk {
+                    let entity_a = *entity_a;
+                    let type_a = *type_a;
+                    let factors = all_factors.get(type_a).unwrap();
+                    let position_a = transform_a.translation.xy();
+
+                    let mut average_position = Vec2::ZERO; // Cohesion
+                    let mut average_direction = Vec2::ZERO; // Alignment
+                    let mut average_close_position = Vec2::ZERO; // Separation
+
+                    let mut vision_count = 0;
+                    let mut half_vision_count = 0;
+
+                    for entity_b in cache_grid.get_nearby_entities(position_a, factors.vision) {
+                        if entity_a == entity_b {
+                            continue;
+                        }
+                        let get_creature = creatures.get(entity_b);
+                        if get_creature.is_err() {
+                            continue;
+                        }
+                        let (_, direction_b, transform_b, _, type_b) = get_creature.unwrap();
+                        if type_a != type_b {
+                            continue;
+                        }
+                        let position_b = transform_b.translation.xy();
+                        let distance = position_a.distance(position_b);
+                        if distance <= factors.vision {
+                            vision_count += 1;
+                            average_position += position_b;
+                            average_direction += direction_b.0;
+                        }
+                        if distance <= factors.vision / 2.0 {
+                            half_vision_count += 1;
+                            average_close_position += position_b;
+                        }
+                        let size = match sprite_a.custom_size {
+                            Some(size) => size,
+                            None => continue,
+                        };
+                        if distance <= size.x * 2.0 {
+                            let away_direction = (position_a - position_b).normalize();
+                            sender
+                                .send(ApplyForceEvent(
+                                    entity_a,
+                                    away_direction,
+                                    factors.collision_avoidance,
+                                ))
+                                .unwrap();
+                        }
+                    }
+
+                    if vision_count > 0 {
+                        average_position /= vision_count as f32;
+                        average_direction /= vision_count as f32;
+                        let cohesion_force =
+                            (average_position - transform_a.translation.xy()).normalize();
+                        sender
+                            .send(ApplyForceEvent(entity_a, cohesion_force, factors.cohesion))
+                            .unwrap();
+                        sender
+                            .send(ApplyForceEvent(
+                                entity_a,
+                                average_direction.normalize(),
+                                factors.alignment,
+                            ))
+                            .unwrap();
+                    }
+                    if half_vision_count > 0 {
+                        average_close_position /= half_vision_count as f32;
+                        let separation_force = (position_a - average_close_position).normalize();
+                        sender
+                            .send(ApplyForceEvent(
+                                entity_a,
+                                separation_force,
+                                factors.separation,
+                            ))
+                            .unwrap();
+                    }
+                }
+            });
         }
-    }
+
+        drop(sender);
+        for apply_force_event in receiver {
+            apply_force_event_handler.send(apply_force_event);
+        }
+    });
 }
 
 fn flocking_system(
@@ -405,9 +643,9 @@ fn flocking_system(
     all_factors: Res<HashMap<CreatureType, Factors>>,
     cache_grid: Res<CacheGrid>,
 ) {
-    for (id_a, _dir_a, trans_a, sprite_a, type_a) in creatures.iter() {
-        let factors_a = all_factors.get(type_a).unwrap();
-        let pos_a = trans_a.translation.xy();
+    creatures.for_each(|(entity_a, _, transform_a, sprite_a, type_a)| {
+        let factors = all_factors.get(type_a).unwrap();
+        let position_a = transform_a.translation.xy();
 
         let mut average_position = Vec2::ZERO; // Cohesion
         let mut average_direction = Vec2::ZERO; // Alignment
@@ -416,62 +654,68 @@ fn flocking_system(
         let mut vision_count = 0;
         let mut half_vision_count = 0;
 
-        let possibles = cache_grid.get_possibles(pos_a, factors_a.vision);
-        for id_b in possibles {
-            if let Ok((id_b, dir_b, trans_b, _sprite_b, type_b)) = creatures.get(id_b) {
-                if id_a == id_b || type_a != type_b {
-                    continue;
-                }
-                let pos_b = trans_b.translation.xy();
-                let distance = pos_a.distance(pos_b);
-                if distance < factors_a.vision {
-                    vision_count += 1;
-                    average_position += pos_b;
-                    average_direction += dir_b.0;
-                }
-                if distance < factors_a.vision / 2.0 {
-                    half_vision_count += 1;
-                    average_close_position += pos_b;
-                }
-                if let Some(size) = sprite_a.custom_size {
-                    if distance < size.x * 2.0 {
-                        let away_direction =
-                            (trans_a.translation.xy() - trans_b.translation.xy()).normalize();
-                        apply_force_event_handler.send(ApplyForceEvent(
-                            id_a,
-                            away_direction,
-                            factors_a.collision_avoidance,
-                        ));
-                    }
-                }
+        for entity_b in cache_grid.get_nearby_entities(position_a, factors.vision) {
+            if entity_a == entity_b {
+                continue;
+            }
+            let get_creature = creatures.get(entity_b);
+            if get_creature.is_err() {
+                continue;
+            }
+            let (_, direction_b, transform_b, _, type_b) = get_creature.unwrap();
+            if type_a != type_b {
+                continue;
+            }
+            let position_b = transform_b.translation.xy();
+            let distance = position_a.distance(position_b);
+            if distance <= factors.vision {
+                vision_count += 1;
+                average_position += position_b;
+                average_direction += direction_b.0;
+            }
+            if distance <= factors.vision / 2.0 {
+                half_vision_count += 1;
+                average_close_position += position_b;
+            }
+            let size = match sprite_a.custom_size {
+                Some(size) => size,
+                None => continue,
+            };
+            if distance <= size.x * 2.0 {
+                let away_direction = (position_a - position_b).normalize();
+                apply_force_event_handler.send(ApplyForceEvent(
+                    entity_a,
+                    away_direction,
+                    factors.collision_avoidance,
+                ));
             }
         }
 
         if vision_count > 0 {
             average_position /= vision_count as f32;
             average_direction /= vision_count as f32;
-            let cohesion_force = (average_position - trans_a.translation.xy()).normalize();
+            let cohesion_force = (average_position - position_a).normalize();
             apply_force_event_handler.send(ApplyForceEvent(
-                id_a,
+                entity_a,
                 cohesion_force,
-                factors_a.cohesion,
+                factors.cohesion,
             ));
             apply_force_event_handler.send(ApplyForceEvent(
-                id_a,
+                entity_a,
                 average_direction.normalize(),
-                factors_a.alignment,
+                factors.alignment,
             ));
         }
         if half_vision_count > 0 {
             average_close_position /= half_vision_count as f32;
-            let separation_force = (trans_a.translation.xy() - average_close_position).normalize();
+            let separation_force = (position_a - average_close_position).normalize();
             apply_force_event_handler.send(ApplyForceEvent(
-                id_a,
+                entity_a,
                 separation_force,
-                factors_a.separation,
+                factors.separation,
             ));
         }
-    }
+    });
 }
 
 fn update_factors_system(
@@ -493,8 +737,8 @@ fn apply_force_event_system(
     timer: Res<Time>,
 ) {
     let delta_time = timer.delta_seconds();
-    for ApplyForceEvent(id, force, factor) in apply_force_event_handler.iter() {
-        if let Ok(mut direction) = creature_query.get_mut(*id) {
+    for ApplyForceEvent(entity, force, factor) in apply_force_event_handler.iter() {
+        if let Ok(mut direction) = creature_query.get_mut(*entity) {
             direction.lerp(*force, factor * delta_time);
         }
     }
@@ -516,7 +760,7 @@ fn cache_grid_update_system(
     mut cache_grid: ResMut<CacheGrid>,
 ) {
     for (entity, transform) in creature_query.iter() {
-        cache_grid.update(entity, transform.translation.xy());
+        cache_grid.update_entity(entity, transform.translation.xy());
     }
 }
 
@@ -569,7 +813,7 @@ fn kill_system(
         let max_x = cursor.position.x + kill_properties.radius;
         let min_y = cursor.position.y - kill_properties.radius;
         let max_y = cursor.position.y + kill_properties.radius;
-        for (id, transform, creature_type) in creatures_query.iter() {
+        for (entity, transform, creature_type) in creatures_query.iter() {
             if transform.translation.x < min_x
                 || transform.translation.x > max_x
                 || transform.translation.y < min_y
@@ -578,7 +822,7 @@ fn kill_system(
             {
                 continue;
             }
-            commands.entity(id).despawn();
+            commands.entity(entity).despawn();
         }
     }
 }
@@ -696,22 +940,35 @@ impl Plugin for BoidsPlugin {
                 .after("movement"),
         );
 
-        app.add_system_set(
-            SystemSet::on_update(SimState::Running)
-                .label("flocking")
-                .label("force_adding")
-                .with_system(flocking_system)
-                .after("caching"),
-        );
+        let flocking_system_set = SystemSet::on_update(SimState::Running)
+            .label("flocking")
+            .label("force_adding")
+            .after("caching");
 
-        app.add_system_set(
-            SystemSet::on_update(SimState::Running)
-                .label("interactions")
-                .label("force_adding")
-                .with_system(scare_system)
-                .with_system(chase_system)
-                .after("caching"),
-        );
+        if IS_WASM {
+            app.add_system_set(flocking_system_set.with_system(flocking_system));
+        } else {
+            app.add_system_set(flocking_system_set.with_system(parallel_flocking_system));
+        }
+
+        let scare_chase_system_set = SystemSet::on_update(SimState::Running)
+            .label("interactions")
+            .label("force_adding")
+            .after("caching");
+
+        if IS_WASM {
+            app.add_system_set(
+                scare_chase_system_set
+                    .with_system(scare_system)
+                    .with_system(chase_system),
+            );
+        } else {
+            app.add_system_set(
+                scare_chase_system_set
+                    .with_system(parallel_scare_system)
+                    .with_system(parallel_chase_system),
+            );
+        }
 
         app.add_system_set(
             SystemSet::on_update(SimState::Running)

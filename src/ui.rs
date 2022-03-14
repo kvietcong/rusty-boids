@@ -10,7 +10,7 @@ use bevy_egui::{
 
 use crate::{
     boids::{KillProperties, SpawnProperties},
-    CreatureType, Factors,
+    CreatureType, Factors, IS_WASM,
 };
 
 #[derive(Component)]
@@ -85,7 +85,7 @@ fn settings_system(
         .anchor(egui::Align2::LEFT_BOTTOM, [10.0, -10.0])
         .vscroll(true)
         .show(egui_context.ctx_mut(), |ui| {
-            if cfg!(target_arch = "wasm32") {
+            if IS_WASM {
                 ui.label(concat!(
                     "LShift and LCtrl detection are a little buggy on the web. ",
                     "The sim can keep keys pressed when you click out. ",

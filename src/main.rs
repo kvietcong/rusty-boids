@@ -3,7 +3,6 @@ use bevy::{
     input::{mouse::MouseButtonInput, ElementState},
     prelude::*,
 };
-
 use std::time::Duration;
 mod boids;
 use boids::*;
@@ -25,8 +24,21 @@ pub struct Cursor {
 #[derive(Component)]
 struct MainCamera;
 
-const WIDTH: f32 = 1600.0;
-const HEIGHT: f32 = 900.0;
+pub const IS_WASM: bool = cfg!(target_arch = "wasm32");
+
+// Got to find out why these `cfg` directives with `wasm` don't work for me
+// Weird that the macro works though...
+// #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+const WIDTH: f32 = if IS_WASM { 1300.0 } else { 1600.0 };
+
+// #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+const HEIGHT: f32 = if IS_WASM { 600.0 } else { 900.0 };
+
+// #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+// const HEIGHT: f32 = 1600.0;
+
+// #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+// const HEIGHT: f32 = 600.0;
 
 fn setup_cameras(mut commands: Commands) {
     commands
