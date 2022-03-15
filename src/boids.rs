@@ -9,7 +9,7 @@ use bevy::{
 };
 use rand::prelude::*;
 
-use crate::{Cursor, DebugState, IS_WASM};
+use crate::{ui::SelectedCreatureType, Cursor, DebugState, IS_WASM};
 
 pub const POPULATION_A: usize = if IS_WASM { 600 } else { 1600 };
 pub const POPULATION_B: usize = if IS_WASM { 50 } else { 200 };
@@ -43,7 +43,6 @@ pub struct Factors {
 pub struct SpawnProperties {
     pub amount: usize,
     pub radius: f32,
-    pub creature_type: CreatureType,
 }
 
 impl Default for SpawnProperties {
@@ -51,7 +50,6 @@ impl Default for SpawnProperties {
         SpawnProperties {
             amount: 10,
             radius: 10.0,
-            creature_type: CreatureType::A,
         }
     }
 }
@@ -59,18 +57,15 @@ impl Default for SpawnProperties {
 #[derive(Debug)]
 pub struct KillProperties {
     pub radius: f32,
-    pub creature_types: HashSet<CreatureType>,
 }
 
 impl Default for KillProperties {
     fn default() -> Self {
-        KillProperties {
-            radius: 100.0,
-            creature_types: CreatureType::all().into_iter().collect(),
-        }
+        KillProperties { radius: 100.0 }
     }
 }
 
+// TODO: Maybe generalize this?
 #[derive(Clone, Debug, PartialEq, Copy, Component, Eq, Hash)]
 pub enum CreatureType {
     A,
@@ -78,12 +73,30 @@ pub enum CreatureType {
     C,
 }
 
+impl Default for CreatureType {
+    fn default() -> Self {
+        CreatureType::A
+    }
+}
+
+impl From<usize> for CreatureType {
+    fn from(val: usize) -> Self {
+        CreatureType::all()[val]
+    }
+}
+
+impl std::fmt::Display for CreatureType {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.to_str())
+    }
+}
+
 impl CreatureType {
     pub fn all() -> [CreatureType; 3] {
         [CreatureType::A, CreatureType::B, CreatureType::C]
     }
 
-    pub fn to_string(&self) -> &'static str {
+    pub fn to_str(&self) -> &'static str {
         match self {
             CreatureType::A => "A",
             CreatureType::B => "B",
@@ -770,6 +783,7 @@ fn spawn_system(
     keys: Res<Input<KeyCode>>,
     spawn_properties: Res<SpawnProperties>,
     all_factors: Res<HashMap<CreatureType, Factors>>,
+    selected_creature_type: Res<SelectedCreatureType>,
     mut mouse_button_events: EventReader<MouseButtonInput>,
 ) {
     for event in mouse_button_events.iter() {
@@ -784,7 +798,7 @@ fn spawn_system(
             spawn_creature_randomly(
                 Some(&mut rng),
                 &mut commands,
-                spawn_properties.creature_type,
+                selected_creature_type.0,
                 all_factors.as_ref(),
                 cursor.position.x - spawn_properties.radius,
                 cursor.position.x + spawn_properties.radius,
@@ -799,8 +813,9 @@ fn kill_system(
     mut commands: Commands,
     keys: Res<Input<KeyCode>>,
     kill_properties: Res<KillProperties>,
-    creatures_query: Query<(Entity, &Transform, &CreatureType)>,
+    selected_creature_type: Res<SelectedCreatureType>,
     mut mouse_button_events: EventReader<MouseButtonInput>,
+    creatures_query: Query<(Entity, &Transform, &CreatureType)>,
 ) {
     for event in mouse_button_events.iter() {
         if event.button != MouseButton::Left
@@ -813,16 +828,15 @@ fn kill_system(
         let max_x = cursor.position.x + kill_properties.radius;
         let min_y = cursor.position.y - kill_properties.radius;
         let max_y = cursor.position.y + kill_properties.radius;
-        for (entity, transform, creature_type) in creatures_query.iter() {
-            if transform.translation.x < min_x
-                || transform.translation.x > max_x
-                || transform.translation.y < min_y
-                || transform.translation.y > max_y
-                || !kill_properties.creature_types.contains(&creature_type)
+        for (entity, transform, &creature_type) in creatures_query.iter() {
+            if transform.translation.x >= min_x
+                && transform.translation.x <= max_x
+                && transform.translation.y >= min_y
+                && transform.translation.y <= max_y
+                && selected_creature_type.0 == creature_type
             {
-                continue;
+                commands.entity(entity).despawn();
             }
-            commands.entity(entity).despawn();
         }
     }
 }
