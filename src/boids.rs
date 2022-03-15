@@ -9,11 +9,13 @@ use bevy::{
 };
 use rand::prelude::*;
 
-use crate::{ui::SelectedCreatureType, Cursor, DebugState, IS_WASM};
+use crate::{Cursor, DebugState, IS_WASM};
 
-pub const POPULATION_A: usize = if IS_WASM { 600 } else { 1600 };
-pub const POPULATION_B: usize = if IS_WASM { 50 } else { 200 };
-pub const POPULATION_C: usize = if IS_WASM { 50 } else { 200 };
+pub const INITIAL_POPULATIONS: [usize; 3] = [
+    if IS_WASM { 600 } else { 1600 },
+    if IS_WASM { 50 } else { 200 },
+    if IS_WASM { 50 } else { 200 },
+];
 
 pub const CHUNK_RESOLUTION: usize = 20;
 
@@ -23,7 +25,7 @@ pub enum SimState {
     Paused,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Factors {
     pub color: Color,
     pub speed: f32,
@@ -37,6 +39,25 @@ pub struct Factors {
     pub chase: f32,
     pub scared_of: HashSet<CreatureType>,
     pub will_chase: HashSet<CreatureType>,
+}
+
+impl Default for Factors {
+    fn default() -> Self {
+        Self {
+            color: Color::PINK,
+            speed: 70.0,
+            vision: 15.0,
+            size: Vec2::new(2.0, 6.0),
+            cohesion: 1.0,
+            separation: 1.0,
+            alignment: 3.0,
+            collision_avoidance: 4.0,
+            scare: 5.0,
+            chase: 5.0,
+            scared_of: HashSet::default(),
+            will_chase: HashSet::default(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -67,41 +88,29 @@ impl Default for KillProperties {
 
 // TODO: Maybe generalize this?
 #[derive(Clone, Debug, PartialEq, Copy, Component, Eq, Hash)]
-pub enum CreatureType {
-    A,
-    B,
-    C,
-}
+pub struct CreatureType(pub usize);
 
 impl Default for CreatureType {
     fn default() -> Self {
-        CreatureType::A
+        CreatureType(0)
     }
 }
 
 impl From<usize> for CreatureType {
     fn from(val: usize) -> Self {
-        CreatureType::all()[val]
+        CreatureType(val)
     }
 }
 
 impl std::fmt::Display for CreatureType {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.to_str())
+        write!(f, "{}", self.to_string())
     }
 }
 
 impl CreatureType {
-    pub fn all() -> [CreatureType; 3] {
-        [CreatureType::A, CreatureType::B, CreatureType::C]
-    }
-
-    pub fn to_str(&self) -> &'static str {
-        match self {
-            CreatureType::A => "A",
-            CreatureType::B => "B",
-            CreatureType::C => "C",
-        }
+    pub fn to_string(&self) -> String {
+        format!("Type {}", self.0)
     }
 }
 
@@ -212,7 +221,7 @@ fn spawn_creature(
             },
             transform: Transform {
                 translation: Vec3::new(x, y, 0.0),
-                rotation: Quat::from_rotation_z(direction_vector.y.atan2(direction_vector.x)),
+                rotation: Quat::from_rotation_z(-direction_vector.x.atan2(direction_vector.y)),
                 ..Transform::default()
             },
             ..SpriteBundle::default()
@@ -277,36 +286,22 @@ fn setup_creatures(
 
     let mut rng = rand::thread_rng();
     let all_factors = all_factors.as_ref();
-    for _ in 0..POPULATION_A {
-        spawn_creature_randomly_on_screen(
-            Some(&mut rng),
-            &mut commands,
-            CreatureType::A,
-            all_factors,
-            screen_width,
-            screen_height,
-        );
-    }
-    for _ in 0..POPULATION_B {
-        spawn_creature_randomly_on_screen(
-            Some(&mut rng),
-            &mut commands,
-            CreatureType::B,
-            all_factors,
-            screen_width,
-            screen_height,
-        );
-    }
-    for _ in 0..POPULATION_C {
-        spawn_creature_randomly_on_screen(
-            Some(&mut rng),
-            &mut commands,
-            CreatureType::C,
-            all_factors,
-            screen_width,
-            screen_height,
-        );
-    }
+    INITIAL_POPULATIONS
+        .into_iter()
+        .enumerate()
+        .for_each(|(index, population_size)| {
+            let creature_type = CreatureType(index);
+            for _ in 0..population_size {
+                spawn_creature_randomly_on_screen(
+                    Some(&mut rng),
+                    &mut commands,
+                    creature_type,
+                    all_factors,
+                    screen_width,
+                    screen_height,
+                );
+            }
+        });
 }
 
 fn move_system(
@@ -318,7 +313,7 @@ fn move_system(
         let speed = all_factors.get(creature_type).unwrap().speed;
         transform.translation.x += direction.0.x * speed * timer.delta_seconds();
         transform.translation.y += direction.0.y * speed * timer.delta_seconds();
-        transform.rotation = Quat::from_rotation_z(direction.0.y.atan2(direction.0.x));
+        transform.rotation = Quat::from_rotation_z(-direction.0.x.atan2(direction.0.y));
     }
 }
 
@@ -783,7 +778,7 @@ fn spawn_system(
     keys: Res<Input<KeyCode>>,
     spawn_properties: Res<SpawnProperties>,
     all_factors: Res<HashMap<CreatureType, Factors>>,
-    selected_creature_type: Res<SelectedCreatureType>,
+    selected_creature_type: Res<CreatureType>,
     mut mouse_button_events: EventReader<MouseButtonInput>,
 ) {
     for event in mouse_button_events.iter() {
@@ -798,7 +793,7 @@ fn spawn_system(
             spawn_creature_randomly(
                 Some(&mut rng),
                 &mut commands,
-                selected_creature_type.0,
+                *selected_creature_type,
                 all_factors.as_ref(),
                 cursor.position.x - spawn_properties.radius,
                 cursor.position.x + spawn_properties.radius,
@@ -808,12 +803,13 @@ fn spawn_system(
         }
     }
 }
+
 fn kill_system(
     cursor: Res<Cursor>,
     mut commands: Commands,
     keys: Res<Input<KeyCode>>,
     kill_properties: Res<KillProperties>,
-    selected_creature_type: Res<SelectedCreatureType>,
+    selected_creature_type: Res<CreatureType>,
     mut mouse_button_events: EventReader<MouseButtonInput>,
     creatures_query: Query<(Entity, &Transform, &CreatureType)>,
 ) {
@@ -833,7 +829,7 @@ fn kill_system(
                 && transform.translation.x <= max_x
                 && transform.translation.y >= min_y
                 && transform.translation.y <= max_y
-                && selected_creature_type.0 == creature_type
+                && *selected_creature_type == creature_type
             {
                 commands.entity(entity).despawn();
             }
@@ -850,15 +846,15 @@ impl Default for BoidsPlugin {
         let mut initial_factors = HashMap::default();
 
         let mut a_scared_of = HashSet::default();
-        a_scared_of.insert(CreatureType::B);
-        a_scared_of.insert(CreatureType::C);
+        a_scared_of.insert(CreatureType(1));
+        a_scared_of.insert(CreatureType(2));
         initial_factors.insert(
-            CreatureType::A,
+            CreatureType(0),
             Factors {
                 color: Color::WHITE,
                 speed: 70.0,
                 vision: 20.0,
-                size: Vec2::new(4.0, 1.0),
+                size: Vec2::new(1.0, 4.0),
                 cohesion: 1.0,
                 separation: 1.0,
                 alignment: 3.0,
@@ -871,15 +867,15 @@ impl Default for BoidsPlugin {
         );
 
         let mut b_will_chase = HashSet::default();
-        b_will_chase.insert(CreatureType::A);
-        b_will_chase.insert(CreatureType::C);
+        b_will_chase.insert(CreatureType(0));
+        b_will_chase.insert(CreatureType(2));
         initial_factors.insert(
-            CreatureType::B,
+            CreatureType(1),
             Factors {
                 color: Color::RED,
                 speed: 60.0,
                 vision: 30.0,
-                size: Vec2::new(8.0, 4.0),
+                size: Vec2::new(4.0, 8.0),
                 cohesion: 0.5,
                 separation: 0.5,
                 alignment: 2.0,
@@ -892,16 +888,16 @@ impl Default for BoidsPlugin {
         );
 
         let mut c_scared_of = HashSet::default();
-        c_scared_of.insert(CreatureType::B);
+        c_scared_of.insert(CreatureType(2));
         let mut c_will_chase = HashSet::default();
-        c_will_chase.insert(CreatureType::A);
+        c_will_chase.insert(CreatureType(0));
         initial_factors.insert(
-            CreatureType::C,
+            CreatureType(2),
             Factors {
                 color: Color::GOLD,
                 speed: 65.0,
                 vision: 25.0,
-                size: Vec2::new(6.0, 2.0),
+                size: Vec2::new(2.0, 6.0),
                 cohesion: 0.75,
                 separation: 0.75,
                 alignment: 2.5,
@@ -922,8 +918,9 @@ impl Plugin for BoidsPlugin {
         // Insert Resources
         app.insert_resource(self.initial_factors.clone())
             .insert_resource(CacheGrid::default())
-            .insert_resource(SpawnProperties::default())
+            .insert_resource(CreatureType::default())
             .insert_resource(KillProperties::default())
+            .insert_resource(SpawnProperties::default())
             .add_event::<ApplyForceEvent>()
             .add_state(SimState::Running);
 
