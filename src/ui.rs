@@ -4,7 +4,7 @@ use bevy::{
     utils::HashMap,
 };
 use bevy_egui::{
-    egui::{self, color_picker::color_edit_button_rgb},
+    egui::{self, color_picker::color_edit_button_rgb, color::Hsva},
     EguiContext, EguiPlugin,
 };
 
@@ -177,7 +177,9 @@ fn settings_system(
 }
 
 fn factors_system(
+    mut commands: Commands,
     mut egui_context: ResMut<EguiContext>,
+    mut creature_query: Query<(Entity, &mut CreatureType)>,
     mut selected_creature_type: ResMut<CreatureType>,
     mut all_factors: ResMut<HashMap<CreatureType, Factors>>,
 ) {
@@ -185,50 +187,85 @@ fn factors_system(
         .anchor(egui::Align2::RIGHT_BOTTOM, [-10.0, -10.0])
         .vscroll(true)
         .show(egui_context.ctx_mut(), |ui| {
+            let mut selected_type_index = selected_creature_type.0;
+            egui::ComboBox::from_label("Select a Creature Type")
+                .selected_text(format!("{}", CreatureType(selected_type_index)))
+                .show_ui(ui, |ui| {
+                    (0..all_factors.len()).for_each(|creature_index| {
+                        ui.horizontal(|ui| {
+                            let factors = all_factors.get(&CreatureType(creature_index)).unwrap();
+                            let color = Hsva::from_rgb([factors.color.r(), factors.color.g(), factors.color.b()]);
+                            ui.selectable_value(
+                                &mut selected_type_index,
+                                creature_index,
+                                CreatureType(creature_index).to_string(),
+                            );
+                            egui::widgets::color_picker::show_color(ui, color, egui::Vec2::new(10.0, 10.0));
+                        });
+                    });
+                });
+            selected_creature_type.0 = selected_type_index;
+
             if ui.button("Add New Creature Type").clicked() {
                 let new_creature_type = CreatureType(all_factors.len());
                 all_factors.insert(new_creature_type, Factors::default());
                 selected_creature_type.0 = new_creature_type.0;
             }
 
-            let mut selected_type_index = selected_creature_type.0;
-            egui::ComboBox::from_label("Select a Creature Type")
-                .selected_text(format!("{}", CreatureType(selected_type_index)))
-                .show_ui(ui, |ui| {
-                    (0..all_factors.len()).for_each(|creature_index| {
-                        ui.selectable_value(
-                            &mut selected_type_index,
-                            creature_index,
-                            CreatureType(creature_index).to_string(),
-                        );
-                    });
-                });
-            selected_creature_type.0 = selected_type_index;
+            // This is so hacky. I hate this. I'm so sorry.
+            if all_factors.len() > 1 && ui.button("Remove Current Creature Type").clicked() {
+                let selected_index = selected_creature_type.0;
+                for (entity, mut creature_type) in creature_query.iter_mut() {
+                    if *creature_type.as_ref() == *selected_creature_type {
+                        commands.entity(entity).despawn();
+                    } else if creature_type.0 > selected_index {
+                        creature_type.0 -= 1;
+                    }
+                }
+
+                for (mut creature_type, mut factors) in all_factors.drain().collect::<Vec<_>>() {
+                    if creature_type == *selected_creature_type {
+                        continue;
+                    } else if creature_type.0 > selected_index {
+                        creature_type.0 -= 1;
+                    }
+                    factors.scared_of.remove(&selected_creature_type);
+                    factors.will_chase.remove(&selected_creature_type);
+                    for mut scared_of in factors.scared_of.drain().collect::<Vec<_>>() {
+                        if scared_of == *selected_creature_type {
+                            continue;
+                        } else if scared_of.0 > selected_index {
+                            scared_of.0 -= 1;
+                        }
+                        factors.scared_of.insert(scared_of);
+                    }
+                    for mut will_chase in factors.will_chase.drain().collect::<Vec<_>>() {
+                        if will_chase == *selected_creature_type {
+                            continue;
+                        } else if will_chase.0 > selected_index {
+                            will_chase.0 -= 1;
+                        }
+                        factors.will_chase.insert(will_chase);
+                    }
+                    all_factors.insert(creature_type, factors);
+                }
+                selected_creature_type.0 = selected_creature_type.0.min(all_factors.len() - 1);
+            }
+
+            ui.separator();
+
             let selected_creature_type = *selected_creature_type.as_ref();
-
-            // TODO: Add ability to remove types
-            // Okay this is quite a bit more complex than I originally thought.
-            // if ui.button("Remove Current Creature Type").clicked() {
-            //     if all_factors.len() > 1 {
-            //         for (entity, &creature_type) in creature_query.iter() {
-            //             if creature_type == selected_creature_type {
-            //                 commands.entity(entity).despawn();
-            //             }
-            //         }
-            //         all_factors.remove(&selected_creature_type);
-            //     }
-            //     selected_creature_type.0 = 0;
-            // }
-
-            let all_creature_types = &(0..all_factors.len())
+            let all_creature_types = (0..all_factors.len())
                 .map(|creature_index| CreatureType(creature_index))
                 .collect::<Vec<_>>();
             let factors = all_factors.get_mut(&selected_creature_type).unwrap();
 
-            ui.label("Color");
-            let mut color = [factors.color.r(), factors.color.g(), factors.color.b()];
-            color_edit_button_rgb(ui, &mut color);
-            factors.color = color.into();
+            ui.horizontal(|ui| {
+                let mut color = [factors.color.r(), factors.color.g(), factors.color.b()];
+                color_edit_button_rgb(ui, &mut color);
+                factors.color = color.into();
+                ui.label("Color");
+            });
 
             ui.add(egui::Slider::new(&mut factors.speed, 20.0..=200.0).text("Speed"));
             ui.add(egui::Slider::new(&mut factors.alignment, 0.0..=20.0).text("Alignment"));
@@ -245,7 +282,7 @@ fn factors_system(
             ui.add(egui::Slider::new(&mut factors.size.y, 0.5..=50.0).text("Length"));
 
             ui.collapsing("Scared of", |ui| {
-                for &other_creature_type in all_creature_types {
+                for &other_creature_type in all_creature_types.iter() {
                     if selected_creature_type == other_creature_type {
                         continue;
                     }
@@ -260,7 +297,7 @@ fn factors_system(
             });
 
             ui.collapsing("Chasing", |ui| {
-                for &other_creature_type in all_creature_types {
+                for &other_creature_type in all_creature_types.iter() {
                     if selected_creature_type == other_creature_type {
                         continue;
                     }
@@ -284,8 +321,14 @@ impl Plugin for UiPlugin {
         app.add_plugin(EguiPlugin)
             .add_startup_system(fps_text_setup);
 
-        app.add_system(factors_system)
-            .add_system(settings_system)
+        // Ensure I don't delete entities before they are compared
+        // by adding the `after` clause. Despawn seems to take place on
+        // the frame after calling. If not, then the Bevy scheduler
+        // has the possibility of running the two systems simultaneously
+        // which is a big no no when I have the chance to delete entities.
+        app.add_system(factors_system.after("force_adding"));
+
+        app.add_system(settings_system)
             .add_system(statistics_system)
             .add_system(fps_text_update_system);
     }

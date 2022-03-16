@@ -9,7 +9,7 @@ use bevy::{
 };
 use rand::prelude::*;
 
-use crate::{Cursor, DebugState, IS_WASM};
+use crate::{ui::UiPlugin, Cursor, DebugState, IS_WASM};
 
 pub const INITIAL_POPULATIONS: [usize; 3] = [
     if IS_WASM { 600 } else { 1600 },
@@ -344,6 +344,9 @@ fn parallel_scare_system(
 ) {
     let creature_vec = creatures.iter().collect::<Vec<_>>();
     let creatures_per_thread = creature_vec.len() / compute_task_pool.0.thread_num();
+    if creatures_per_thread <= 0 {
+        return;
+    }
 
     let cache_grid = &cache_grid;
     let creatures = &creatures;
@@ -431,6 +434,9 @@ fn parallel_chase_system(
 ) {
     let creature_vec = creatures.iter().collect::<Vec<_>>();
     let creatures_per_thread = creature_vec.len() / compute_task_pool.0.thread_num();
+    if creatures_per_thread <= 0 {
+        return;
+    }
 
     let cache_grid = &cache_grid;
     let creatures = &creatures;
@@ -544,6 +550,9 @@ fn parallel_flocking_system(
 ) {
     let creature_vec = creatures.iter().collect::<Vec<_>>();
     let creatures_per_thread = creature_vec.len() / compute_task_pool.0.thread_num();
+    if creatures_per_thread <= 0 {
+        return;
+    }
 
     let cache_grid = &cache_grid;
     let creatures = &creatures;
@@ -923,6 +932,9 @@ impl Plugin for BoidsPlugin {
             .insert_resource(SpawnProperties::default())
             .add_event::<ApplyForceEvent>()
             .add_state(SimState::Running);
+
+        // Adding UI
+        app.add_plugin(UiPlugin::default());
 
         // Start up
         app.add_startup_system(setup_creatures);

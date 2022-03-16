@@ -3,11 +3,10 @@ use bevy::{
     input::{mouse::MouseButtonInput, ElementState},
     prelude::*,
 };
+mod ui;
 use std::time::Duration;
 mod boids;
 use boids::*;
-mod ui;
-use ui::*;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum DebugState {
@@ -116,11 +115,8 @@ fn main() {
 
     app.add_system(handle_key_system).add_system(cursor_system);
 
-    // Adding Boids Simulation
+    // Adding Boids Simulation which includes the UI plugin
     app.add_plugin(BoidsPlugin::default());
-
-    // Adding UI
-    app.add_plugin(UiPlugin::default());
 
     // Diagnostic stuff (FPS printing, etc)
     app.add_plugin(FrameTimeDiagnosticsPlugin::default())
