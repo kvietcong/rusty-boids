@@ -4,12 +4,12 @@ use bevy::{
     utils::HashMap,
 };
 use bevy_egui::{
-    egui::{self, color_picker::color_edit_button_rgb, color::Hsva},
+    egui::{self, color::Hsva, color_picker::color_edit_button_rgb},
     EguiContext, EguiPlugin,
 };
 
 use crate::{
-    boids::{KillProperties, SpawnProperties},
+    boids::{DespawnProperties, Features, SpawnProperties},
     CreatureType, Factors, IS_WASM,
 };
 
@@ -107,10 +107,11 @@ fn statistics_system(
 fn settings_system(
     keys: Res<Input<KeyCode>>,
     mut windows: ResMut<Windows>,
+    mut features: ResMut<Features>,
     mut egui_context: ResMut<EguiContext>,
     selected_creature_type: Res<CreatureType>,
-    mut kill_properties: ResMut<KillProperties>,
     mut spawn_properties: ResMut<SpawnProperties>,
+    mut despawn_properties: ResMut<DespawnProperties>,
 ) {
     egui::Window::new("Settings")
         .anchor(egui::Align2::LEFT_BOTTOM, [10.0, -10.0])
@@ -144,15 +145,26 @@ fn settings_system(
 
             ui.collapsing(
                 format!(
-                    "Killing Type {} (LCtrl+Click to Kill)",
+                    "Despawn Type {} (LCtrl+Click to Despawn)",
                     selected_creature_type.0
                 ),
                 |ui| {
                     ui.add(
-                        egui::Slider::new(&mut kill_properties.radius, 5.0..=500.0).text("Radius"),
+                        egui::Slider::new(&mut despawn_properties.radius, 5.0..=500.0)
+                            .text("Radius"),
                     );
                 },
             );
+
+            ui.collapsing("Features", |ui| {
+                ui.label("Enable or Disable Simulation Features");
+                ui.checkbox(&mut features.chasing, "Chasing");
+                ui.checkbox(&mut features.running, "Running");
+                ui.checkbox(&mut features.flocking, "Flocking");
+                ui.checkbox(&mut features.killing, "Killing");
+                ui.checkbox(&mut features.reproduction, "Reproduction");
+                ui.checkbox(&mut features.energy_draining, "Energy Draining");
+            });
 
             let window = windows.get_primary_mut().unwrap();
             let is_shift = keys.pressed(KeyCode::LShift);
@@ -194,13 +206,21 @@ fn factors_system(
                     (0..all_factors.len()).for_each(|creature_index| {
                         ui.horizontal(|ui| {
                             let factors = all_factors.get(&CreatureType(creature_index)).unwrap();
-                            let color = Hsva::from_rgb([factors.color.r(), factors.color.g(), factors.color.b()]);
+                            let color = Hsva::from_rgb([
+                                factors.color.r(),
+                                factors.color.g(),
+                                factors.color.b(),
+                            ]);
                             ui.selectable_value(
                                 &mut selected_type_index,
                                 creature_index,
                                 CreatureType(creature_index).to_string(),
                             );
-                            egui::widgets::color_picker::show_color(ui, color, egui::Vec2::new(10.0, 10.0));
+                            egui::widgets::color_picker::show_color(
+                                ui,
+                                color,
+                                egui::Vec2::new(10.0, 10.0),
+                            );
                         });
                     });
                 });
@@ -229,23 +249,14 @@ fn factors_system(
                     } else if creature_type.0 > selected_index {
                         creature_type.0 -= 1;
                     }
-                    factors.scared_of.remove(&selected_creature_type);
-                    factors.will_chase.remove(&selected_creature_type);
-                    for mut scared_of in factors.scared_of.drain().collect::<Vec<_>>() {
-                        if scared_of == *selected_creature_type {
+                    factors.predator_of.remove(&selected_creature_type);
+                    for mut prey in factors.predator_of.drain().collect::<Vec<_>>() {
+                        if prey == *selected_creature_type {
                             continue;
-                        } else if scared_of.0 > selected_index {
-                            scared_of.0 -= 1;
+                        } else if prey.0 > selected_index {
+                            prey.0 -= 1;
                         }
-                        factors.scared_of.insert(scared_of);
-                    }
-                    for mut will_chase in factors.will_chase.drain().collect::<Vec<_>>() {
-                        if will_chase == *selected_creature_type {
-                            continue;
-                        } else if will_chase.0 > selected_index {
-                            will_chase.0 -= 1;
-                        }
-                        factors.will_chase.insert(will_chase);
+                        factors.predator_of.insert(prey);
                     }
                     all_factors.insert(creature_type, factors);
                 }
@@ -280,33 +291,24 @@ fn factors_system(
             ui.add(egui::Slider::new(&mut factors.vision, 10.0..=200.0).text("Vision"));
             ui.add(egui::Slider::new(&mut factors.size.x, 0.5..=50.0).text("Width"));
             ui.add(egui::Slider::new(&mut factors.size.y, 0.5..=50.0).text("Length"));
+            ui.add(egui::Slider::new(&mut factors.max_energy, 20.0..=200.0).text("Max Energy"));
+            ui.add(
+                egui::Slider::new(&mut factors.fertility_cooldown, 1.0..=60.0)
+                    .text("Fertility Cooldown"),
+            );
 
-            ui.collapsing("Scared of", |ui| {
+            ui.collapsing("Predator of", |ui| {
                 for &other_creature_type in all_creature_types.iter() {
                     if selected_creature_type == other_creature_type {
                         continue;
                     }
-                    let mut is_scared = factors.scared_of.contains(&other_creature_type);
-                    ui.checkbox(&mut is_scared, other_creature_type.to_string());
-                    if is_scared {
-                        factors.scared_of.insert(other_creature_type);
+                    let mut is_predator_of_other =
+                        factors.predator_of.contains(&other_creature_type);
+                    ui.checkbox(&mut is_predator_of_other, other_creature_type.to_string());
+                    if is_predator_of_other {
+                        factors.predator_of.insert(other_creature_type);
                     } else {
-                        factors.scared_of.remove(&other_creature_type);
-                    }
-                }
-            });
-
-            ui.collapsing("Chasing", |ui| {
-                for &other_creature_type in all_creature_types.iter() {
-                    if selected_creature_type == other_creature_type {
-                        continue;
-                    }
-                    let mut will_chase = factors.will_chase.contains(&other_creature_type);
-                    ui.checkbox(&mut will_chase, other_creature_type.to_string());
-                    if will_chase {
-                        factors.will_chase.insert(other_creature_type);
-                    } else {
-                        factors.will_chase.remove(&other_creature_type);
+                        factors.predator_of.remove(&other_creature_type);
                     }
                 }
             });
@@ -321,12 +323,7 @@ impl Plugin for UiPlugin {
         app.add_plugin(EguiPlugin)
             .add_startup_system(fps_text_setup);
 
-        // Ensure I don't delete entities before they are compared
-        // by adding the `after` clause. Despawn seems to take place on
-        // the frame after calling. If not, then the Bevy scheduler
-        // has the possibility of running the two systems simultaneously
-        // which is a big no no when I have the chance to delete entities.
-        app.add_system(factors_system.after("force_adding"));
+        app.add_system(factors_system.label("despawning"));
 
         app.add_system(settings_system)
             .add_system(statistics_system)

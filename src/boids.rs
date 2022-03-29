@@ -1,4 +1,4 @@
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 use bevy::{
     input::{mouse::MouseButtonInput, ElementState},
@@ -11,10 +11,32 @@ use rand::prelude::*;
 
 use crate::{ui::UiPlugin, Cursor, DebugState, IS_WASM};
 
+pub struct Features {
+    pub chasing: bool,
+    pub running: bool,
+    pub killing: bool,
+    pub flocking: bool,
+    pub reproduction: bool,
+    pub energy_draining: bool,
+}
+
+impl Default for Features {
+    fn default() -> Self {
+        Features {
+            chasing: true,
+            running: true,
+            flocking: true,
+            killing: false,
+            reproduction: false,
+            energy_draining: false,
+        }
+    }
+}
+
 pub const INITIAL_POPULATIONS: [usize; 3] = [
-    if IS_WASM { 600 } else { 1600 },
+    if IS_WASM { 500 } else { 1000 },
     if IS_WASM { 50 } else { 200 },
-    if IS_WASM { 50 } else { 200 },
+    if IS_WASM { 50 } else { 300 },
 ];
 
 pub const CHUNK_RESOLUTION: usize = 20;
@@ -37,8 +59,9 @@ pub struct Factors {
     pub collision_avoidance: f32,
     pub scare: f32,
     pub chase: f32,
-    pub scared_of: HashSet<CreatureType>,
-    pub will_chase: HashSet<CreatureType>,
+    pub max_energy: f32,
+    pub fertility_cooldown: f32,
+    pub predator_of: HashSet<CreatureType>,
 }
 
 impl Default for Factors {
@@ -54,8 +77,9 @@ impl Default for Factors {
             collision_avoidance: 4.0,
             scare: 5.0,
             chase: 5.0,
-            scared_of: HashSet::default(),
-            will_chase: HashSet::default(),
+            max_energy: 100.0,
+            fertility_cooldown: 15.0,
+            predator_of: HashSet::default(),
         }
     }
 }
@@ -76,13 +100,13 @@ impl Default for SpawnProperties {
 }
 
 #[derive(Debug)]
-pub struct KillProperties {
+pub struct DespawnProperties {
     pub radius: f32,
 }
 
-impl Default for KillProperties {
+impl Default for DespawnProperties {
     fn default() -> Self {
-        KillProperties { radius: 100.0 }
+        DespawnProperties { radius: 100.0 }
     }
 }
 
@@ -136,7 +160,18 @@ impl Direction {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Component)]
+pub struct Fertility {
+    pub time_till_fertile: f32,
+    pub amount: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Component, PartialOrd)]
+pub struct Energy(f32);
+
 struct ApplyForceEvent(Entity, Vec2, f32);
+
+struct EnergyChangeEvent(Entity, f32);
 
 #[derive(Debug, Default)]
 struct CacheGrid {
@@ -227,6 +262,11 @@ fn spawn_creature(
             ..SpriteBundle::default()
         })
         .insert(Direction(direction_vector))
+        .insert(Energy(factors.max_energy))
+        .insert(Fertility {
+            time_till_fertile: factors.fertility_cooldown,
+            amount: 1,
+        })
         .insert(creature_type);
 }
 
@@ -335,13 +375,17 @@ fn wrap_borders_system(mut query: Query<&mut Transform>, windows: ResMut<Windows
     }
 }
 
-fn parallel_scare_system(
-    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+fn scare_system(
+    apply_force_event_handler: EventWriter<ApplyForceEvent>,
     creatures: Query<(Entity, &Transform, &CreatureType)>,
     all_factors: Res<HashMap<CreatureType, Factors>>,
     compute_task_pool: Res<ComputeTaskPool>,
     cache_grid: Res<CacheGrid>,
+    features: Res<Features>,
 ) {
+    if !features.running {
+        return;
+    }
     let creature_vec = creatures.iter().collect::<Vec<_>>();
     let creatures_per_thread = creature_vec.len() / compute_task_pool.0.thread_num();
     if creatures_per_thread <= 0 {
@@ -351,18 +395,17 @@ fn parallel_scare_system(
     let cache_grid = &cache_grid;
     let creatures = &creatures;
     let all_factors = &all_factors;
+    let apply_force_event_handler = Arc::new(Mutex::new(apply_force_event_handler));
 
     compute_task_pool.scope(|scope| {
-        let (sender, receiver) = mpsc::channel();
-
         for chunk in creature_vec.chunks(creatures_per_thread) {
-            let sender = sender.clone();
+            let apply_force_event_handler = apply_force_event_handler.clone();
             scope.spawn(async move {
                 for (entity_a, transform_a, type_a) in chunk {
                     let entity_a = *entity_a;
                     let position_a = transform_a.translation.xy();
-                    let factors = all_factors.get(type_a).unwrap();
-                    for entity_b in cache_grid.get_nearby_entities(position_a, factors.vision) {
+                    let factors_a = all_factors.get(type_a).unwrap();
+                    for entity_b in cache_grid.get_nearby_entities(position_a, factors_a.vision) {
                         if entity_b == entity_a {
                             continue;
                         }
@@ -370,68 +413,35 @@ fn parallel_scare_system(
                             Ok(creature) => (creature.1.translation.xy(), creature.2),
                             Err(_) => continue,
                         };
-                        if !factors.scared_of.contains(&type_b) {
+                        let factors_b = all_factors.get(type_b).unwrap();
+                        if !factors_b.predator_of.contains(&type_a) {
                             continue;
                         }
-                        if position_a.distance(position_b) <= factors.vision {
+                        if position_a.distance(position_b) <= factors_a.vision {
                             let run_direction = (position_a - position_b).normalize();
-                            sender
-                                .send(ApplyForceEvent(entity_a, run_direction, factors.scare))
-                                .unwrap();
+                            apply_force_event_handler
+                                .lock()
+                                .unwrap()
+                                .send(ApplyForceEvent(entity_a, run_direction, factors_a.scare));
                         }
                     }
                 }
             });
         }
-
-        drop(sender);
-        receiver
-            .iter()
-            .for_each(|event| apply_force_event_handler.send(event));
     });
 }
 
-fn scare_system(
-    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
-    creatures: Query<(Entity, &Transform, &CreatureType)>,
-    all_factors: Res<HashMap<CreatureType, Factors>>,
-    cache_grid: Res<CacheGrid>,
-) {
-    // I use `for_each` because it's faster than `iter` according to the Bevy docs
-    creatures.for_each(|(entity_a, transform_a, type_a)| {
-        let position_a = transform_a.translation.xy();
-        let factors = all_factors.get(type_a).unwrap();
-        for entity_b in cache_grid.get_nearby_entities(position_a, factors.vision) {
-            if entity_b == entity_a {
-                continue;
-            }
-            let (position_b, type_b) = match creatures.get(entity_b) {
-                Ok(creature) => (creature.1.translation.xy(), creature.2),
-                Err(_) => continue,
-            };
-            if !factors.scared_of.contains(&type_b) {
-                continue;
-            }
-            let distance = position_a.distance(position_b);
-            if distance <= factors.vision {
-                let run_direction = (position_a - position_b).normalize();
-                apply_force_event_handler.send(ApplyForceEvent(
-                    entity_a,
-                    run_direction,
-                    factors.scare,
-                ));
-            }
-        }
-    });
-}
-
-fn parallel_chase_system(
-    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+fn chase_system(
+    apply_force_event_handler: EventWriter<ApplyForceEvent>,
     creatures: Query<(Entity, &Transform, &CreatureType)>,
     all_factors: Res<HashMap<CreatureType, Factors>>,
     compute_task_pool: Res<ComputeTaskPool>,
     cache_grid: Res<CacheGrid>,
+    features: Res<Features>,
 ) {
+    if !features.chasing {
+        return;
+    }
     let creature_vec = creatures.iter().collect::<Vec<_>>();
     let creatures_per_thread = creature_vec.len() / compute_task_pool.0.thread_num();
     if creatures_per_thread <= 0 {
@@ -441,12 +451,11 @@ fn parallel_chase_system(
     let cache_grid = &cache_grid;
     let creatures = &creatures;
     let all_factors = &all_factors;
+    let apply_force_event_handler = Arc::new(Mutex::new(apply_force_event_handler));
 
     compute_task_pool.scope(|scope| {
-        let (sender, receiver) = mpsc::channel();
-
         for chunk in creature_vec.chunks(creatures_per_thread) {
-            let sender = sender.clone();
+            let apply_force_event_handler = apply_force_event_handler.clone();
             scope.spawn(async move {
                 for (entity_a, transform_a, type_a) in chunk {
                     let id_a = *entity_a;
@@ -461,7 +470,7 @@ fn parallel_chase_system(
                             Ok(creature) => (creature.1.translation.xy(), creature.2),
                             Err(_) => continue,
                         };
-                        if !factors.will_chase.contains(&type_b) {
+                        if !factors.predator_of.contains(&type_b) {
                             continue;
                         }
                         let distance = position_a.distance(position_b);
@@ -484,70 +493,27 @@ fn parallel_chase_system(
                         (_, None) => continue,
                     };
                     let chase_direction = (closest_position - position_a).normalize();
-                    sender
-                        .send(ApplyForceEvent(id_a, chase_direction, factors.chase))
-                        .unwrap();
+                    apply_force_event_handler
+                        .lock()
+                        .unwrap()
+                        .send(ApplyForceEvent(id_a, chase_direction, factors.chase));
                 }
             });
         }
-
-        drop(sender);
-        receiver
-            .iter()
-            .for_each(|event| apply_force_event_handler.send(event));
     });
 }
 
-fn chase_system(
-    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
-    creatures: Query<(Entity, &Transform, &CreatureType)>,
-    all_factors: Res<HashMap<CreatureType, Factors>>,
-    cache_grid: Res<CacheGrid>,
-) {
-    creatures.for_each(|(entity_a, transform_a, type_a)| {
-        let position_a = transform_a.translation.xy();
-        let factors = all_factors.get(type_a).unwrap();
-        let mut closest_target = (0.0, None);
-
-        for entity_b in cache_grid.get_nearby_entities(position_a, factors.vision) {
-            let (position_b, type_b) = match creatures.get(entity_b) {
-                Ok(creature) => (creature.1.translation.xy(), creature.2),
-                Err(_) => continue,
-            };
-            if !factors.will_chase.contains(type_b) {
-                continue;
-            }
-            let distance = position_a.distance(position_b);
-            if distance <= factors.vision {
-                closest_target = match closest_target {
-                    (_, None) => (distance, Some(position_b)),
-                    (old_distance, Some(_)) => {
-                        if old_distance > distance {
-                            (distance, Some(position_b))
-                        } else {
-                            closest_target
-                        }
-                    }
-                };
-            }
-        }
-
-        let closest_position = match closest_target {
-            (_, Some(position)) => position,
-            (_, None) => return,
-        };
-        let chase_direction = (closest_position - position_a).normalize();
-        apply_force_event_handler.send(ApplyForceEvent(entity_a, chase_direction, factors.chase));
-    });
-}
-
-fn parallel_flocking_system(
-    creatures: Query<(Entity, &Direction, &Transform, &Sprite, &CreatureType)>,
-    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
+fn flocking_system(
+    creatures: Query<(Entity, &Direction, &Transform, &CreatureType)>,
+    apply_force_event_handler: EventWriter<ApplyForceEvent>,
     all_factors: Res<HashMap<CreatureType, Factors>>,
     compute_task_pool: Res<ComputeTaskPool>,
     cache_grid: Res<CacheGrid>,
+    features: Res<Features>,
 ) {
+    if !features.flocking {
+        return;
+    }
     let creature_vec = creatures.iter().collect::<Vec<_>>();
     let creatures_per_thread = creature_vec.len() / compute_task_pool.0.thread_num();
     if creatures_per_thread <= 0 {
@@ -557,14 +523,13 @@ fn parallel_flocking_system(
     let cache_grid = &cache_grid;
     let creatures = &creatures;
     let all_factors = &all_factors;
+    let apply_force_event_handler = Arc::new(Mutex::new(apply_force_event_handler));
 
     compute_task_pool.scope(|scope| {
-        let (sender, receiver) = mpsc::channel();
-
         for chunk in creature_vec.chunks(creatures_per_thread) {
-            let sender = sender.clone();
+            let apply_force_event_handler = apply_force_event_handler.clone();
             scope.spawn(async move {
-                for (entity_a, _, transform_a, sprite_a, type_a) in chunk {
+                for (entity_a, _, transform_a, type_a) in chunk {
                     let entity_a = *entity_a;
                     let type_a = *type_a;
                     let factors = all_factors.get(type_a).unwrap();
@@ -585,7 +550,7 @@ fn parallel_flocking_system(
                         if get_creature.is_err() {
                             continue;
                         }
-                        let (_, direction_b, transform_b, _, type_b) = get_creature.unwrap();
+                        let (_, direction_b, transform_b, type_b) = get_creature.unwrap();
                         if type_a != type_b {
                             continue;
                         }
@@ -600,19 +565,16 @@ fn parallel_flocking_system(
                             half_vision_count += 1;
                             average_close_position += position_b;
                         }
-                        let size = match sprite_a.custom_size {
-                            Some(size) => size,
-                            None => continue,
-                        };
-                        if distance <= size.x * 2.0 {
+                        if distance <= factors.size.max_element() * 2.0 {
                             let away_direction = (position_a - position_b).normalize();
-                            sender
+                            apply_force_event_handler
+                                .lock()
+                                .unwrap()
                                 .send(ApplyForceEvent(
                                     entity_a,
                                     away_direction,
                                     factors.collision_avoidance,
-                                ))
-                                .unwrap();
+                                ));
                         }
                     }
 
@@ -621,116 +583,33 @@ fn parallel_flocking_system(
                         average_direction /= vision_count as f32;
                         let cohesion_force =
                             (average_position - transform_a.translation.xy()).normalize();
-                        sender
-                            .send(ApplyForceEvent(entity_a, cohesion_force, factors.cohesion))
-                            .unwrap();
-                        sender
+                        apply_force_event_handler
+                            .lock()
+                            .unwrap()
+                            .send(ApplyForceEvent(entity_a, cohesion_force, factors.cohesion));
+                        apply_force_event_handler
+                            .lock()
+                            .unwrap()
                             .send(ApplyForceEvent(
                                 entity_a,
                                 average_direction.normalize(),
                                 factors.alignment,
-                            ))
-                            .unwrap();
+                            ));
                     }
                     if half_vision_count > 0 {
                         average_close_position /= half_vision_count as f32;
                         let separation_force = (position_a - average_close_position).normalize();
-                        sender
+                        apply_force_event_handler
+                            .lock()
+                            .unwrap()
                             .send(ApplyForceEvent(
                                 entity_a,
                                 separation_force,
                                 factors.separation,
-                            ))
-                            .unwrap();
+                            ));
                     }
                 }
             });
-        }
-
-        drop(sender);
-        for apply_force_event in receiver {
-            apply_force_event_handler.send(apply_force_event);
-        }
-    });
-}
-
-fn flocking_system(
-    creatures: Query<(Entity, &Direction, &Transform, &Sprite, &CreatureType)>,
-    mut apply_force_event_handler: EventWriter<ApplyForceEvent>,
-    all_factors: Res<HashMap<CreatureType, Factors>>,
-    cache_grid: Res<CacheGrid>,
-) {
-    creatures.for_each(|(entity_a, _, transform_a, sprite_a, type_a)| {
-        let factors = all_factors.get(type_a).unwrap();
-        let position_a = transform_a.translation.xy();
-
-        let mut average_position = Vec2::ZERO; // Cohesion
-        let mut average_direction = Vec2::ZERO; // Alignment
-        let mut average_close_position = Vec2::ZERO; // Separation
-
-        let mut vision_count = 0;
-        let mut half_vision_count = 0;
-
-        for entity_b in cache_grid.get_nearby_entities(position_a, factors.vision) {
-            if entity_a == entity_b {
-                continue;
-            }
-            let get_creature = creatures.get(entity_b);
-            if get_creature.is_err() {
-                continue;
-            }
-            let (_, direction_b, transform_b, _, type_b) = get_creature.unwrap();
-            if type_a != type_b {
-                continue;
-            }
-            let position_b = transform_b.translation.xy();
-            let distance = position_a.distance(position_b);
-            if distance <= factors.vision {
-                vision_count += 1;
-                average_position += position_b;
-                average_direction += direction_b.0;
-            }
-            if distance <= factors.vision / 2.0 {
-                half_vision_count += 1;
-                average_close_position += position_b;
-            }
-            let size = match sprite_a.custom_size {
-                Some(size) => size,
-                None => continue,
-            };
-            if distance <= size.x * 2.0 {
-                let away_direction = (position_a - position_b).normalize();
-                apply_force_event_handler.send(ApplyForceEvent(
-                    entity_a,
-                    away_direction,
-                    factors.collision_avoidance,
-                ));
-            }
-        }
-
-        if vision_count > 0 {
-            average_position /= vision_count as f32;
-            average_direction /= vision_count as f32;
-            let cohesion_force = (average_position - position_a).normalize();
-            apply_force_event_handler.send(ApplyForceEvent(
-                entity_a,
-                cohesion_force,
-                factors.cohesion,
-            ));
-            apply_force_event_handler.send(ApplyForceEvent(
-                entity_a,
-                average_direction.normalize(),
-                factors.alignment,
-            ));
-        }
-        if half_vision_count > 0 {
-            average_close_position /= half_vision_count as f32;
-            let separation_force = (position_a - average_close_position).normalize();
-            apply_force_event_handler.send(ApplyForceEvent(
-                entity_a,
-                separation_force,
-                factors.separation,
-            ));
         }
     });
 }
@@ -813,11 +692,11 @@ fn spawn_system(
     }
 }
 
-fn kill_system(
+fn despawn_system(
     cursor: Res<Cursor>,
     mut commands: Commands,
     keys: Res<Input<KeyCode>>,
-    kill_properties: Res<KillProperties>,
+    despawn_properties: Res<DespawnProperties>,
     selected_creature_type: Res<CreatureType>,
     mut mouse_button_events: EventReader<MouseButtonInput>,
     creatures_query: Query<(Entity, &Transform, &CreatureType)>,
@@ -829,10 +708,10 @@ fn kill_system(
         {
             continue;
         }
-        let min_x = cursor.position.x - kill_properties.radius;
-        let max_x = cursor.position.x + kill_properties.radius;
-        let min_y = cursor.position.y - kill_properties.radius;
-        let max_y = cursor.position.y + kill_properties.radius;
+        let min_x = cursor.position.x - despawn_properties.radius;
+        let max_x = cursor.position.x + despawn_properties.radius;
+        let min_y = cursor.position.y - despawn_properties.radius;
+        let max_y = cursor.position.y + despawn_properties.radius;
         for (entity, transform, &creature_type) in creatures_query.iter() {
             if transform.translation.x >= min_x
                 && transform.translation.x <= max_x
@@ -840,6 +719,144 @@ fn kill_system(
                 && transform.translation.y <= max_y
                 && *selected_creature_type == creature_type
             {
+                commands.entity(entity).despawn();
+            }
+        }
+    }
+}
+
+fn kill_system(
+    mut commands: Commands,
+    features: Res<Features>,
+    cache_grid: Res<CacheGrid>,
+    all_factors: Res<HashMap<CreatureType, Factors>>,
+    creatures: Query<(Entity, &Transform, &CreatureType, &Energy)>,
+    mut energy_change_event_handler: EventWriter<EnergyChangeEvent>,
+) {
+    if !features.killing {
+        return;
+    }
+    creatures.for_each(|(entity_a, transform_a, type_a, energy_a)| {
+        let position_a = transform_a.translation.xy();
+        let factors_a = all_factors.get(type_a).unwrap();
+
+        for entity_b in cache_grid.get_nearby_entities(position_a, factors_a.vision) {
+            if entity_b == entity_a {
+                continue;
+            }
+            let (position_b, type_b, energy_b) = match creatures.get(entity_b) {
+                Ok(creature) => (creature.1.translation.xy(), creature.2, creature.3),
+                Err(_) => continue,
+            };
+            let factors_b = all_factors.get(type_b).unwrap();
+            if position_a.distance(position_b)
+                <= factors_a.size.min_element() + factors_b.size.min_element()
+                && factors_a.predator_of.contains(type_b)
+            {
+                let (killed_entity, killer_entity) =
+                    if factors_b.predator_of.contains(type_a) && energy_a < energy_b {
+                        (entity_a, entity_b)
+                    } else {
+                        (entity_b, entity_a)
+                    };
+                energy_change_event_handler.send(EnergyChangeEvent(killer_entity, 4.0));
+                commands.entity(killed_entity).despawn();
+            }
+        }
+    });
+}
+
+fn reproduction_system(
+    timer: Res<Time>,
+    mut commands: Commands,
+    features: Res<Features>,
+    cache_grid: Res<CacheGrid>,
+    all_factors: Res<HashMap<CreatureType, Factors>>,
+    mut energy_change_event_handler: EventWriter<EnergyChangeEvent>,
+    mut creatures: Query<(Entity, &Transform, &CreatureType, &mut Fertility)>,
+) {
+    if !features.reproduction {
+        return;
+    }
+    let mut reproducers = HashSet::default();
+    reproducers.reserve(1000);
+    creatures.for_each(|(entity_a, transform_a, type_a, fertility)| {
+        let position_a = transform_a.translation.xy();
+        let factors = all_factors.get(type_a).unwrap();
+
+        for entity_b in cache_grid.get_nearby_entities(position_a, factors.vision) {
+            if entity_b == entity_a {
+                continue;
+            }
+            let (position_b, type_b) = match creatures.get(entity_b) {
+                Ok(creature) => (creature.1.translation.xy(), creature.2),
+                Err(_) => continue,
+            };
+            if position_a.distance(position_b) <= factors.size.max_element() * 2.0
+                && type_a == type_b
+                && !reproducers.contains(&entity_a)
+                && !reproducers.contains(&entity_b)
+                && fertility.time_till_fertile <= 0.0
+            {
+                let spawn_radius = 15.0;
+                for _ in 0..fertility.amount {
+                    spawn_creature_randomly(
+                        None,
+                        &mut commands,
+                        *type_a,
+                        &all_factors,
+                        position_a.x - spawn_radius,
+                        position_a.x + spawn_radius,
+                        position_a.y - spawn_radius,
+                        position_a.y + spawn_radius,
+                    );
+                }
+                reproducers.insert(entity_a);
+                energy_change_event_handler.send(EnergyChangeEvent(entity_a, -15.0));
+            }
+        }
+    });
+
+    let delta_seconds = timer.delta_seconds();
+    creatures.for_each_mut(|(entity, _, creature_type, mut fertility)| {
+        if reproducers.contains(&entity) {
+            fertility.time_till_fertile =
+                all_factors.get(creature_type).unwrap().fertility_cooldown;
+        } else {
+            fertility.time_till_fertile -= delta_seconds;
+            fertility.time_till_fertile = fertility.time_till_fertile.max(0.0);
+        }
+    });
+}
+
+fn energy_drain_system(
+    timer: Res<Time>,
+    features: Res<Features>,
+    creatures: Query<Entity, With<Energy>>,
+    mut energy_change_event_handler: EventWriter<EnergyChangeEvent>,
+) {
+    if !features.energy_draining {
+        return;
+    }
+    let delta_seconds = timer.delta_seconds();
+    let burn_rate = 2f32;
+    creatures.for_each(|entity| {
+        energy_change_event_handler.send(EnergyChangeEvent(entity, -delta_seconds * burn_rate))
+    });
+}
+
+fn apply_energy_change_system(
+    mut commands: Commands,
+    all_factors: Res<HashMap<CreatureType, Factors>>,
+    mut creature_query: Query<(Entity, &mut Energy, &CreatureType)>,
+    mut energy_change_even_handler: EventReader<EnergyChangeEvent>,
+) {
+    for EnergyChangeEvent(entity, change) in energy_change_even_handler.iter() {
+        if let Ok((entity, mut energy, creature_type)) = creature_query.get_mut(*entity) {
+            let factors = all_factors.get(creature_type).unwrap();
+            energy.0 += change;
+            energy.0 = energy.0.clamp(0.0, factors.max_energy);
+            if energy.0 <= 0.0 {
                 commands.entity(entity).despawn();
             }
         }
@@ -854,9 +871,6 @@ impl Default for BoidsPlugin {
     fn default() -> Self {
         let mut initial_factors = HashMap::default();
 
-        let mut a_scared_of = HashSet::default();
-        a_scared_of.insert(CreatureType(1));
-        a_scared_of.insert(CreatureType(2));
         initial_factors.insert(
             CreatureType(0),
             Factors {
@@ -870,14 +884,16 @@ impl Default for BoidsPlugin {
                 collision_avoidance: 3.5,
                 scare: 10.0,
                 chase: 0.0,
-                scared_of: a_scared_of,
-                will_chase: HashSet::default(),
+                max_energy: 50.0,
+                fertility_cooldown: 10.0,
+                predator_of: HashSet::default(),
+                ..Default::default()
             },
         );
 
-        let mut b_will_chase = HashSet::default();
-        b_will_chase.insert(CreatureType(0));
-        b_will_chase.insert(CreatureType(2));
+        let mut b_predator_of = HashSet::default();
+        b_predator_of.insert(CreatureType(0));
+        b_predator_of.insert(CreatureType(2));
         initial_factors.insert(
             CreatureType(1),
             Factors {
@@ -891,15 +907,15 @@ impl Default for BoidsPlugin {
                 collision_avoidance: 2.0,
                 scare: 0.0,
                 chase: 2.0,
-                scared_of: HashSet::default(),
-                will_chase: b_will_chase,
+                max_energy: 35.0,
+                fertility_cooldown: 20.0,
+                predator_of: b_predator_of,
+                ..Default::default()
             },
         );
 
-        let mut c_scared_of = HashSet::default();
-        c_scared_of.insert(CreatureType(2));
-        let mut c_will_chase = HashSet::default();
-        c_will_chase.insert(CreatureType(0));
+        let mut c_predator_of = HashSet::default();
+        c_predator_of.insert(CreatureType(0));
         initial_factors.insert(
             CreatureType(2),
             Factors {
@@ -913,8 +929,10 @@ impl Default for BoidsPlugin {
                 collision_avoidance: 3.0,
                 scare: 5.0,
                 chase: 1.0,
-                scared_of: c_scared_of,
-                will_chase: c_will_chase,
+                max_energy: 50.0,
+                fertility_cooldown: 15.0,
+                predator_of: c_predator_of,
+                ..Default::default()
             },
         );
 
@@ -926,11 +944,13 @@ impl Plugin for BoidsPlugin {
     fn build(&self, app: &mut App) {
         // Insert Resources
         app.insert_resource(self.initial_factors.clone())
+            .insert_resource(Features::default())
             .insert_resource(CacheGrid::default())
             .insert_resource(CreatureType::default())
-            .insert_resource(KillProperties::default())
+            .insert_resource(DespawnProperties::default())
             .insert_resource(SpawnProperties::default())
             .add_event::<ApplyForceEvent>()
+            .add_event::<EnergyChangeEvent>()
             .add_state(SimState::Running);
 
         // Adding UI
@@ -944,7 +964,7 @@ impl Plugin for BoidsPlugin {
                 .label("sim_updates")
                 .with_system(update_factors_system)
                 .with_system(handle_input_system)
-                .with_system(kill_system)
+                .with_system(despawn_system)
                 .with_system(spawn_system),
         );
 
@@ -952,51 +972,47 @@ impl Plugin for BoidsPlugin {
             SystemSet::on_update(SimState::Running)
                 .label("movement")
                 .with_system(move_system)
-                .with_system(wrap_borders_system)
-                .before("caching"),
+                .before("caching")
+                .with_system(wrap_borders_system),
+        );
+
+        app.add_system_set(
+            SystemSet::on_update(SimState::Running)
+                .label("energy_changing")
+                .with_system(energy_drain_system)
+                .with_system(kill_system.label("despawning"))
+                .with_system(reproduction_system.label("spawning")),
         );
 
         app.add_system_set(
             SystemSet::on_update(SimState::Running)
                 .label("caching")
-                .with_system(cache_grid_update_system)
-                .after("movement"),
+                .after("movement")
+                .with_system(cache_grid_update_system),
         );
 
-        let flocking_system_set = SystemSet::on_update(SimState::Running)
-            .label("flocking")
-            .label("force_adding")
-            .after("caching");
-
-        if IS_WASM {
-            app.add_system_set(flocking_system_set.with_system(flocking_system));
-        } else {
-            app.add_system_set(flocking_system_set.with_system(parallel_flocking_system));
-        }
-
-        let scare_chase_system_set = SystemSet::on_update(SimState::Running)
-            .label("interactions")
-            .label("force_adding")
-            .after("caching");
-
-        if IS_WASM {
-            app.add_system_set(
-                scare_chase_system_set
-                    .with_system(scare_system)
-                    .with_system(chase_system),
-            );
-        } else {
-            app.add_system_set(
-                scare_chase_system_set
-                    .with_system(parallel_scare_system)
-                    .with_system(parallel_chase_system),
-            );
-        }
+        app.add_system_set(
+            SystemSet::on_update(SimState::Running)
+                .label("interactions")
+                .label("force_adding")
+                .before("spawning")
+                .before("despawning")
+                .after("caching")
+                .with_system(flocking_system)
+                .with_system(scare_system)
+                .with_system(chase_system),
+        );
 
         app.add_system_set(
             SystemSet::on_update(SimState::Running)
                 .with_system(apply_force_event_system)
                 .after("force_adding"),
+        );
+
+        app.add_system_set(
+            SystemSet::on_update(SimState::Running)
+                .with_system(apply_energy_change_system)
+                .after("energy_changing"),
         );
 
         app.add_system_set(SystemSet::on_update(DebugState::On));
