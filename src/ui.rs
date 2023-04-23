@@ -1,16 +1,16 @@
 use bevy::{
     diagnostic::{Diagnostics, FrameTimeDiagnosticsPlugin},
     prelude::*,
-    utils::HashMap,
+    window::{PrimaryWindow, WindowResolution},
 };
 use bevy_egui::{
-    egui::{self, color::Hsva, color_picker::color_edit_button_rgb},
-    EguiContext, EguiPlugin,
+    egui::{self, color_picker::color_edit_button_rgb, Rgba},
+    EguiContexts, EguiPlugin,
 };
 
 use crate::{
     boids::{DespawnProperties, Features, SpawnProperties},
-    CreatureType, Factors, IS_WASM,
+    CreatureType, FactorInfo, Factors, IS_WASM,
 };
 
 #[derive(Component)]
@@ -18,10 +18,10 @@ struct FPSText;
 
 fn fps_text_setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands
-        .spawn_bundle(TextBundle {
+        .spawn(TextBundle {
             style: Style {
                 position_type: PositionType::Absolute,
-                position: Rect {
+                position: UiRect {
                     top: Val::Px(10.0),
                     left: Val::Px(10.0),
                     ..Default::default()
@@ -76,11 +76,11 @@ fn fps_text_update_system(
 
 fn statistics_system(
     creature_query: Query<&CreatureType>,
-    mut egui_context: ResMut<EguiContext>,
-    all_factors: Res<HashMap<CreatureType, Factors>>,
+    mut egui_context: EguiContexts,
+    all_factors: Res<FactorInfo>,
 ) {
     let population_information = creature_query.iter().fold(
-        vec![0; all_factors.len()],
+        vec![0; all_factors.factors.len()],
         |mut population_information, &creature_type| {
             population_information[creature_type.0] += 1;
             population_information
@@ -106,12 +106,12 @@ fn statistics_system(
 
 fn settings_system(
     keys: Res<Input<KeyCode>>,
-    mut windows: ResMut<Windows>,
     mut features: ResMut<Features>,
-    mut egui_context: ResMut<EguiContext>,
+    mut egui_context: EguiContexts,
     selected_creature_type: Res<CreatureType>,
     mut spawn_properties: ResMut<SpawnProperties>,
     mut despawn_properties: ResMut<DespawnProperties>,
+    mut primary_query: Query<&mut Window, With<PrimaryWindow>>,
 ) {
     egui::Window::new("Settings")
         .anchor(egui::Align2::LEFT_BOTTOM, [10.0, -10.0])
@@ -166,7 +166,7 @@ fn settings_system(
                 ui.checkbox(&mut features.energy_draining, "Energy Draining");
             });
 
-            let window = windows.get_primary_mut().unwrap();
+            let mut window = primary_query.get_single_mut().unwrap();
             let is_shift = keys.pressed(KeyCode::LShift);
             let is_ctrl = keys.pressed(KeyCode::LControl);
             ui.collapsing("Screen", |ui| {
@@ -178,11 +178,11 @@ fn settings_system(
                 let change = change as f32;
                 if ui.button("Width").clicked() {
                     let new_width = (window.width() + change).max(500.0);
-                    window.set_resolution(new_width, window.height());
+                    window.resolution = WindowResolution::new(new_width, window.height());
                 }
                 if ui.button("Height").clicked() {
                     let new_height = (window.height() + change).max(500.0);
-                    window.set_resolution(window.width(), new_height);
+                    window.resolution = WindowResolution::new(window.width(), new_height);
                 }
             });
         });
@@ -190,10 +190,10 @@ fn settings_system(
 
 fn factors_system(
     mut commands: Commands,
-    mut egui_context: ResMut<EguiContext>,
-    mut creature_query: Query<(Entity, &mut CreatureType)>,
+    mut egui_context: EguiContexts,
+    mut all_factors: ResMut<FactorInfo>,
     mut selected_creature_type: ResMut<CreatureType>,
-    mut all_factors: ResMut<HashMap<CreatureType, Factors>>,
+    mut creature_query: Query<(Entity, &mut CreatureType)>,
 ) {
     egui::Window::new("Edit Factors")
         .anchor(egui::Align2::RIGHT_BOTTOM, [-10.0, -10.0])
@@ -203,14 +203,17 @@ fn factors_system(
             egui::ComboBox::from_label("Select a Creature Type")
                 .selected_text(format!("{}", CreatureType(selected_type_index)))
                 .show_ui(ui, |ui| {
-                    (0..all_factors.len()).for_each(|creature_index| {
+                    (0..all_factors.factors.len()).for_each(|creature_index| {
                         ui.horizontal(|ui| {
-                            let factors = all_factors.get(&CreatureType(creature_index)).unwrap();
-                            let color = Hsva::from_rgb([
+                            let factors = all_factors
+                                .factors
+                                .get(&CreatureType(creature_index))
+                                .unwrap();
+                            let color = Rgba::from_rgb(
                                 factors.color.r(),
                                 factors.color.g(),
                                 factors.color.b(),
-                            ]);
+                            );
                             ui.selectable_value(
                                 &mut selected_type_index,
                                 creature_index,
@@ -227,13 +230,16 @@ fn factors_system(
             selected_creature_type.0 = selected_type_index;
 
             if ui.button("Add New Creature Type").clicked() {
-                let new_creature_type = CreatureType(all_factors.len());
-                all_factors.insert(new_creature_type, Factors::default());
+                let new_creature_type = CreatureType(all_factors.factors.len());
+                all_factors
+                    .factors
+                    .insert(new_creature_type, Factors::default());
                 selected_creature_type.0 = new_creature_type.0;
             }
 
             // This is so hacky. I hate this. I'm so sorry.
-            if all_factors.len() > 1 && ui.button("Remove Current Creature Type").clicked() {
+            if all_factors.factors.len() > 1 && ui.button("Remove Current Creature Type").clicked()
+            {
                 let selected_index = selected_creature_type.0;
                 for (entity, mut creature_type) in creature_query.iter_mut() {
                     if *creature_type.as_ref() == *selected_creature_type {
@@ -243,7 +249,9 @@ fn factors_system(
                     }
                 }
 
-                for (mut creature_type, mut factors) in all_factors.drain().collect::<Vec<_>>() {
+                for (mut creature_type, mut factors) in
+                    all_factors.factors.drain().collect::<Vec<_>>()
+                {
                     if creature_type == *selected_creature_type {
                         continue;
                     } else if creature_type.0 > selected_index {
@@ -258,18 +266,22 @@ fn factors_system(
                         }
                         factors.predator_of.insert(prey);
                     }
-                    all_factors.insert(creature_type, factors);
+                    all_factors.factors.insert(creature_type, factors);
                 }
-                selected_creature_type.0 = selected_creature_type.0.min(all_factors.len() - 1);
+                selected_creature_type.0 =
+                    selected_creature_type.0.min(all_factors.factors.len() - 1);
             }
 
             ui.separator();
 
             let selected_creature_type = *selected_creature_type.as_ref();
-            let all_creature_types = (0..all_factors.len())
+            let all_creature_types = (0..all_factors.factors.len())
                 .map(|creature_index| CreatureType(creature_index))
                 .collect::<Vec<_>>();
-            let factors = all_factors.get_mut(&selected_creature_type).unwrap();
+            let factors = all_factors
+                .factors
+                .get_mut(&selected_creature_type)
+                .unwrap();
 
             ui.horizontal(|ui| {
                 let mut color = [factors.color.r(), factors.color.g(), factors.color.b()];
@@ -323,7 +335,9 @@ impl Plugin for UiPlugin {
         app.add_plugin(EguiPlugin)
             .add_startup_system(fps_text_setup);
 
-        app.add_system(factors_system.label("despawning"));
+        app.add_system(
+            factors_system, // .label("despawning")
+        );
 
         app.add_system(settings_system)
             .add_system(statistics_system)

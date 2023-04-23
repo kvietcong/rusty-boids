@@ -1,16 +1,18 @@
 use std::sync::{Arc, Mutex};
 
 use bevy::{
-    input::{mouse::MouseButtonInput, ElementState},
+    input::mouse::MouseButtonInput,
     math::Vec3Swizzles,
     prelude::*,
     tasks::ComputeTaskPool,
     utils::{HashMap, HashSet},
+    window::PrimaryWindow,
 };
 use rand::prelude::*;
 
-use crate::{ui::UiPlugin, Cursor, DebugState, IS_WASM};
+use crate::{ui::UiPlugin, Cursor, IS_WASM};
 
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Resource)]
 pub struct Features {
     pub chasing: bool,
     pub running: bool,
@@ -41,13 +43,14 @@ pub const INITIAL_POPULATIONS: [usize; 3] = [
 
 pub const CHUNK_RESOLUTION: usize = 20;
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, States, Default)]
 pub enum SimState {
+    #[default]
     Running,
     Paused,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Resource)]
 pub struct Factors {
     pub color: Color,
     pub speed: f32,
@@ -84,7 +87,7 @@ impl Default for Factors {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Resource)]
 pub struct SpawnProperties {
     pub amount: usize,
     pub radius: f32,
@@ -99,7 +102,7 @@ impl Default for SpawnProperties {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Resource)]
 pub struct DespawnProperties {
     pub radius: f32,
 }
@@ -111,7 +114,7 @@ impl Default for DespawnProperties {
 }
 
 // TODO: Maybe generalize this?
-#[derive(Clone, Debug, PartialEq, Copy, Component, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Copy, Component, Eq, Hash, Resource)]
 pub struct CreatureType(pub usize);
 
 impl Default for CreatureType {
@@ -173,10 +176,24 @@ struct ApplyForceEvent(Entity, Vec2, f32);
 
 struct EnergyChangeEvent(Entity, f32);
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Resource)]
 struct CacheGrid {
     grid: HashMap<(i8, i8), HashSet<Entity>>,
     associations: HashMap<Entity, (i8, i8)>,
+}
+
+#[derive(Debug, Resource, Default)]
+pub struct FactorInfo {
+    pub factors: HashMap<CreatureType, Factors>,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, SystemSet)]
+enum SystemStages {
+    Spawn,
+    Calculate,
+    Apply,
+    Act,
+    Cache,
 }
 
 impl CacheGrid {
@@ -247,8 +264,7 @@ fn spawn_creature(
 ) {
     let factors = all_factors.get(&creature_type).unwrap();
     commands
-        .spawn()
-        .insert_bundle(SpriteBundle {
+        .spawn(SpriteBundle {
             sprite: Sprite {
                 color: factors.color,
                 custom_size: Some(factors.size),
@@ -316,16 +332,15 @@ fn spawn_creature_randomly_on_screen(
 }
 
 fn setup_creatures(
-    windows: Res<Windows>,
     mut commands: Commands,
-    all_factors: Res<HashMap<CreatureType, Factors>>,
+    factor_info: Res<FactorInfo>,
+    primary_query: Query<&Window, With<PrimaryWindow>>,
 ) {
-    let window = windows.get_primary().unwrap();
+    let window = primary_query.get_single().unwrap();
     let screen_width = window.width();
     let screen_height = window.height();
 
     let mut rng = rand::thread_rng();
-    let all_factors = all_factors.as_ref();
     INITIAL_POPULATIONS
         .into_iter()
         .enumerate()
@@ -336,7 +351,7 @@ fn setup_creatures(
                     Some(&mut rng),
                     &mut commands,
                     creature_type,
-                    all_factors,
+                    &factor_info.factors,
                     screen_width,
                     screen_height,
                 );
@@ -346,19 +361,22 @@ fn setup_creatures(
 
 fn move_system(
     mut query: Query<(&mut Transform, &Direction, &CreatureType)>,
-    all_factors: Res<HashMap<CreatureType, Factors>>,
+    factor_info: Res<FactorInfo>,
     timer: Res<Time>,
 ) {
     for (mut transform, direction, creature_type) in query.iter_mut() {
-        let speed = all_factors.get(creature_type).unwrap().speed;
+        let speed = factor_info.factors.get(creature_type).unwrap().speed;
         transform.translation.x += direction.0.x * speed * timer.delta_seconds();
         transform.translation.y += direction.0.y * speed * timer.delta_seconds();
         transform.rotation = Quat::from_rotation_z(-direction.0.x.atan2(direction.0.y));
     }
 }
 
-fn wrap_borders_system(mut query: Query<&mut Transform>, windows: ResMut<Windows>) {
-    let window = windows.get_primary().unwrap();
+fn wrap_borders_system(
+    mut query: Query<&mut Transform>,
+    primary_query: Query<&Window, With<PrimaryWindow>>,
+) {
+    let window = primary_query.get_single().unwrap();
     let width = window.width();
     let height = window.height();
     for mut transform in query.iter_mut() {
@@ -378,23 +396,23 @@ fn wrap_borders_system(mut query: Query<&mut Transform>, windows: ResMut<Windows
 fn scare_system(
     apply_force_event_handler: EventWriter<ApplyForceEvent>,
     creatures: Query<(Entity, &Transform, &CreatureType)>,
-    all_factors: Res<HashMap<CreatureType, Factors>>,
-    compute_task_pool: Res<ComputeTaskPool>,
+    factor_info: Res<FactorInfo>,
     cache_grid: Res<CacheGrid>,
     features: Res<Features>,
 ) {
     if !features.running {
         return;
     }
+    let compute_task_pool = ComputeTaskPool::get();
     let creature_vec = creatures.iter().collect::<Vec<_>>();
-    let creatures_per_thread = creature_vec.len() / compute_task_pool.0.thread_num();
+    let creatures_per_thread = creature_vec.len() / compute_task_pool.thread_num();
     if creatures_per_thread <= 0 {
         return;
     }
 
     let cache_grid = &cache_grid;
     let creatures = &creatures;
-    let all_factors = &all_factors;
+    let factor_info = &factor_info;
     let apply_force_event_handler = Arc::new(Mutex::new(apply_force_event_handler));
 
     compute_task_pool.scope(|scope| {
@@ -404,7 +422,7 @@ fn scare_system(
                 for (entity_a, transform_a, type_a) in chunk {
                     let entity_a = *entity_a;
                     let position_a = transform_a.translation.xy();
-                    let factors_a = all_factors.get(type_a).unwrap();
+                    let factors_a = factor_info.factors.get(type_a).unwrap();
                     for entity_b in cache_grid.get_nearby_entities(position_a, factors_a.vision) {
                         if entity_b == entity_a {
                             continue;
@@ -413,7 +431,7 @@ fn scare_system(
                             Ok(creature) => (creature.1.translation.xy(), creature.2),
                             Err(_) => continue,
                         };
-                        let factors_b = all_factors.get(type_b).unwrap();
+                        let factors_b = factor_info.factors.get(type_b).unwrap();
                         if !factors_b.predator_of.contains(&type_a) {
                             continue;
                         }
@@ -434,23 +452,23 @@ fn scare_system(
 fn chase_system(
     apply_force_event_handler: EventWriter<ApplyForceEvent>,
     creatures: Query<(Entity, &Transform, &CreatureType)>,
-    all_factors: Res<HashMap<CreatureType, Factors>>,
-    compute_task_pool: Res<ComputeTaskPool>,
+    factor_info: Res<FactorInfo>,
     cache_grid: Res<CacheGrid>,
     features: Res<Features>,
 ) {
     if !features.chasing {
         return;
     }
+    let compute_task_pool = ComputeTaskPool::get();
     let creature_vec = creatures.iter().collect::<Vec<_>>();
-    let creatures_per_thread = creature_vec.len() / compute_task_pool.0.thread_num();
+    let creatures_per_thread = creature_vec.len() / compute_task_pool.thread_num();
     if creatures_per_thread <= 0 {
         return;
     }
 
     let cache_grid = &cache_grid;
     let creatures = &creatures;
-    let all_factors = &all_factors;
+    let factor_info = &factor_info;
     let apply_force_event_handler = Arc::new(Mutex::new(apply_force_event_handler));
 
     compute_task_pool.scope(|scope| {
@@ -460,7 +478,7 @@ fn chase_system(
                 for (entity_a, transform_a, type_a) in chunk {
                     let id_a = *entity_a;
                     let position_a = transform_a.translation.xy();
-                    let factors = all_factors.get(type_a).unwrap();
+                    let factors = factor_info.factors.get(type_a).unwrap();
                     let mut closest_target = (0.0, None);
                     for entity_b in cache_grid.get_nearby_entities(position_a, factors.vision) {
                         if id_a == entity_b {
@@ -503,26 +521,26 @@ fn chase_system(
     });
 }
 
-fn flocking_system(
+fn boids_system(
     creatures: Query<(Entity, &Direction, &Transform, &CreatureType)>,
     apply_force_event_handler: EventWriter<ApplyForceEvent>,
-    all_factors: Res<HashMap<CreatureType, Factors>>,
-    compute_task_pool: Res<ComputeTaskPool>,
+    factor_info: Res<FactorInfo>,
     cache_grid: Res<CacheGrid>,
     features: Res<Features>,
 ) {
     if !features.flocking {
         return;
     }
+    let compute_task_pool = ComputeTaskPool::get();
     let creature_vec = creatures.iter().collect::<Vec<_>>();
-    let creatures_per_thread = creature_vec.len() / compute_task_pool.0.thread_num();
+    let creatures_per_thread = creature_vec.len() / compute_task_pool.thread_num();
     if creatures_per_thread <= 0 {
         return;
     }
 
     let cache_grid = &cache_grid;
     let creatures = &creatures;
-    let all_factors = &all_factors;
+    let factor_info = &factor_info;
     let apply_force_event_handler = Arc::new(Mutex::new(apply_force_event_handler));
 
     compute_task_pool.scope(|scope| {
@@ -532,7 +550,7 @@ fn flocking_system(
                 for (entity_a, _, transform_a, type_a) in chunk {
                     let entity_a = *entity_a;
                     let type_a = *type_a;
-                    let factors = all_factors.get(type_a).unwrap();
+                    let factors = factor_info.factors.get(type_a).unwrap();
                     let position_a = transform_a.translation.xy();
 
                     let mut average_position = Vec2::ZERO; // Cohesion
@@ -616,18 +634,18 @@ fn flocking_system(
 
 fn update_factors_system(
     mut creature_query: Query<(&CreatureType, &mut Sprite)>,
-    all_factors: Res<HashMap<CreatureType, Factors>>,
+    factor_info: Res<FactorInfo>,
 ) {
-    if all_factors.is_changed() {
+    if factor_info.is_changed() {
         for (creature_type, mut sprite) in creature_query.iter_mut() {
-            let factors = all_factors.get(creature_type).unwrap();
+            let factors = factor_info.factors.get(creature_type).unwrap();
             sprite.color = factors.color;
             sprite.custom_size = Some(factors.size);
         }
     }
 }
 
-fn apply_force_event_system(
+fn apply_forces_system(
     mut apply_force_event_handler: EventReader<ApplyForceEvent>,
     mut creature_query: Query<&mut Direction>,
     timer: Res<Time>,
@@ -640,14 +658,18 @@ fn apply_force_event_system(
     }
 }
 
-fn handle_input_system(keys: Res<Input<KeyCode>>, mut sim_state: ResMut<State<SimState>>) {
+fn pause_system(
+    keys: Res<Input<KeyCode>>,
+    sim_state: Res<State<SimState>>,
+    mut next_sim_state: ResMut<NextState<SimState>>,
+) {
     if keys.just_pressed(KeyCode::P) {
-        let current_sim_state = sim_state.current();
-        let new_sim_state = match current_sim_state {
-            SimState::Paused => SimState::Running,
+        let new_sim_state = match sim_state.0 {
             SimState::Running => SimState::Paused,
+            _ => SimState::Running,
         };
-        sim_state.set(new_sim_state).unwrap();
+        println!("{:?} to {:?}", sim_state, new_sim_state);
+        next_sim_state.set(new_sim_state);
     }
 }
 
@@ -664,14 +686,14 @@ fn spawn_system(
     cursor: Res<Cursor>,
     mut commands: Commands,
     keys: Res<Input<KeyCode>>,
+    factor_info: Res<FactorInfo>,
     spawn_properties: Res<SpawnProperties>,
-    all_factors: Res<HashMap<CreatureType, Factors>>,
     selected_creature_type: Res<CreatureType>,
     mut mouse_button_events: EventReader<MouseButtonInput>,
 ) {
     for event in mouse_button_events.iter() {
         if event.button != MouseButton::Left
-            || event.state != ElementState::Pressed
+            || event.state.is_pressed()
             || !keys.pressed(KeyCode::LShift)
         {
             continue;
@@ -682,7 +704,7 @@ fn spawn_system(
                 Some(&mut rng),
                 &mut commands,
                 *selected_creature_type,
-                all_factors.as_ref(),
+                &factor_info.factors,
                 cursor.position.x - spawn_properties.radius,
                 cursor.position.x + spawn_properties.radius,
                 cursor.position.y - spawn_properties.radius,
@@ -703,7 +725,7 @@ fn despawn_system(
 ) {
     for event in mouse_button_events.iter() {
         if event.button != MouseButton::Left
-            || event.state != ElementState::Pressed
+            || event.state.is_pressed()
             || !keys.pressed(KeyCode::LControl)
         {
             continue;
@@ -729,7 +751,7 @@ fn kill_system(
     mut commands: Commands,
     features: Res<Features>,
     cache_grid: Res<CacheGrid>,
-    all_factors: Res<HashMap<CreatureType, Factors>>,
+    factor_info: Res<FactorInfo>,
     creatures: Query<(Entity, &Transform, &CreatureType, &Energy)>,
     mut energy_change_event_handler: EventWriter<EnergyChangeEvent>,
 ) {
@@ -738,7 +760,7 @@ fn kill_system(
     }
     creatures.for_each(|(entity_a, transform_a, type_a, energy_a)| {
         let position_a = transform_a.translation.xy();
-        let factors_a = all_factors.get(type_a).unwrap();
+        let factors_a = factor_info.factors.get(type_a).unwrap();
 
         for entity_b in cache_grid.get_nearby_entities(position_a, factors_a.vision) {
             if entity_b == entity_a {
@@ -748,7 +770,7 @@ fn kill_system(
                 Ok(creature) => (creature.1.translation.xy(), creature.2, creature.3),
                 Err(_) => continue,
             };
-            let factors_b = all_factors.get(type_b).unwrap();
+            let factors_b = factor_info.factors.get(type_b).unwrap();
             if position_a.distance(position_b)
                 <= factors_a.size.min_element() + factors_b.size.min_element()
                 && factors_a.predator_of.contains(type_b)
@@ -771,7 +793,7 @@ fn reproduction_system(
     mut commands: Commands,
     features: Res<Features>,
     cache_grid: Res<CacheGrid>,
-    all_factors: Res<HashMap<CreatureType, Factors>>,
+    factor_info: Res<FactorInfo>,
     mut energy_change_event_handler: EventWriter<EnergyChangeEvent>,
     mut creatures: Query<(Entity, &Transform, &CreatureType, &mut Fertility)>,
 ) {
@@ -782,7 +804,7 @@ fn reproduction_system(
     reproducers.reserve(1000);
     creatures.for_each(|(entity_a, transform_a, type_a, fertility)| {
         let position_a = transform_a.translation.xy();
-        let factors = all_factors.get(type_a).unwrap();
+        let factors = factor_info.factors.get(type_a).unwrap();
 
         for entity_b in cache_grid.get_nearby_entities(position_a, factors.vision) {
             if entity_b == entity_a {
@@ -804,7 +826,7 @@ fn reproduction_system(
                         None,
                         &mut commands,
                         *type_a,
-                        &all_factors,
+                        &factor_info.factors,
                         position_a.x - spawn_radius,
                         position_a.x + spawn_radius,
                         position_a.y - spawn_radius,
@@ -820,8 +842,11 @@ fn reproduction_system(
     let delta_seconds = timer.delta_seconds();
     creatures.for_each_mut(|(entity, _, creature_type, mut fertility)| {
         if reproducers.contains(&entity) {
-            fertility.time_till_fertile =
-                all_factors.get(creature_type).unwrap().fertility_cooldown;
+            fertility.time_till_fertile = factor_info
+                .factors
+                .get(creature_type)
+                .unwrap()
+                .fertility_cooldown;
         } else {
             fertility.time_till_fertile -= delta_seconds;
             fertility.time_till_fertile = fertility.time_till_fertile.max(0.0);
@@ -847,13 +872,13 @@ fn energy_drain_system(
 
 fn apply_energy_change_system(
     mut commands: Commands,
-    all_factors: Res<HashMap<CreatureType, Factors>>,
+    factor_info: Res<FactorInfo>,
     mut creature_query: Query<(Entity, &mut Energy, &CreatureType)>,
     mut energy_change_even_handler: EventReader<EnergyChangeEvent>,
 ) {
     for EnergyChangeEvent(entity, change) in energy_change_even_handler.iter() {
         if let Ok((entity, mut energy, creature_type)) = creature_query.get_mut(*entity) {
-            let factors = all_factors.get(creature_type).unwrap();
+            let factors = factor_info.factors.get(creature_type).unwrap();
             energy.0 += change;
             energy.0 = energy.0.clamp(0.0, factors.max_energy);
             if energy.0 <= 0.0 {
@@ -943,78 +968,53 @@ impl Default for BoidsPlugin {
 impl Plugin for BoidsPlugin {
     fn build(&self, app: &mut App) {
         // Insert Resources
-        app.insert_resource(self.initial_factors.clone())
-            .insert_resource(Features::default())
-            .insert_resource(CacheGrid::default())
-            .insert_resource(CreatureType::default())
-            .insert_resource(DespawnProperties::default())
-            .insert_resource(SpawnProperties::default())
-            .add_event::<ApplyForceEvent>()
-            .add_event::<EnergyChangeEvent>()
-            .add_state(SimState::Running);
-
-        // Adding UI
-        app.add_plugin(UiPlugin::default());
-
-        // Start up
-        app.add_startup_system(setup_creatures);
-
-        app.add_system_set(
-            SystemSet::new()
-                .label("sim_updates")
-                .with_system(update_factors_system)
-                .with_system(handle_input_system)
-                .with_system(despawn_system)
-                .with_system(spawn_system),
-        );
-
-        app.add_system_set(
-            SystemSet::on_update(SimState::Running)
-                .label("movement")
-                .with_system(move_system)
-                .before("caching")
-                .with_system(wrap_borders_system),
-        );
-
-        app.add_system_set(
-            SystemSet::on_update(SimState::Running)
-                .label("energy_changing")
-                .with_system(energy_drain_system)
-                .with_system(kill_system.label("despawning"))
-                .with_system(reproduction_system.label("spawning")),
-        );
-
-        app.add_system_set(
-            SystemSet::on_update(SimState::Running)
-                .label("caching")
-                .after("movement")
-                .with_system(cache_grid_update_system),
-        );
-
-        app.add_system_set(
-            SystemSet::on_update(SimState::Running)
-                .label("interactions")
-                .label("force_adding")
-                .before("spawning")
-                .before("despawning")
-                .after("caching")
-                .with_system(flocking_system)
-                .with_system(scare_system)
-                .with_system(chase_system),
-        );
-
-        app.add_system_set(
-            SystemSet::on_update(SimState::Running)
-                .with_system(apply_force_event_system)
-                .after("force_adding"),
-        );
-
-        app.add_system_set(
-            SystemSet::on_update(SimState::Running)
-                .with_system(apply_energy_change_system)
-                .after("energy_changing"),
-        );
-
-        app.add_system_set(SystemSet::on_update(DebugState::On));
+        app.insert_resource(FactorInfo {
+            factors: self.initial_factors.clone(),
+        })
+        .insert_resource(Features::default())
+        .insert_resource(CacheGrid::default())
+        .insert_resource(CreatureType::default())
+        .insert_resource(DespawnProperties::default())
+        .insert_resource(SpawnProperties::default())
+        .add_event::<ApplyForceEvent>()
+        .add_event::<EnergyChangeEvent>()
+        .add_state::<SimState>()
+        .add_plugin(UiPlugin::default())
+        .add_startup_system(setup_creatures)
+        .configure_sets((
+            SystemStages::Spawn,
+            SystemStages::Calculate,
+            SystemStages::Apply,
+            SystemStages::Act,
+            SystemStages::Cache,
+        ))
+        .add_systems((update_factors_system, pause_system))
+        .add_systems(
+            (despawn_system, spawn_system, kill_system)
+                .in_set(SystemStages::Spawn)
+                .in_set(OnUpdate(SimState::Running)),
+        )
+        .add_systems(
+            (
+                boids_system,
+                scare_system,
+                chase_system,
+                energy_drain_system,
+                reproduction_system,
+            )
+                .in_set(SystemStages::Calculate)
+                .in_set(OnUpdate(SimState::Running)),
+        )
+        .add_systems(
+            (apply_forces_system, apply_energy_change_system)
+                .in_set(SystemStages::Apply)
+                .in_set(OnUpdate(SimState::Running)),
+        )
+        .add_systems(
+            (move_system, wrap_borders_system)
+                .in_set(SystemStages::Act)
+                .in_set(OnUpdate(SimState::Running)),
+        )
+        .add_system(cache_grid_update_system.in_set(SystemStages::Cache));
     }
 }
