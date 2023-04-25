@@ -200,7 +200,8 @@ fn factors_system(
         .vscroll(true)
         .show(egui_context.ctx_mut(), |ui| {
             let mut selected_type_index = selected_creature_type.0;
-            egui::ComboBox::from_label("Select a Creature Type")
+
+            egui::ComboBox::from_label("Select")
                 .selected_text(format!("{}", CreatureType(selected_type_index)))
                 .show_ui(ui, |ui| {
                     (0..all_factors.factors.len()).for_each(|creature_index| {
@@ -227,50 +228,52 @@ fn factors_system(
                         });
                     });
                 });
+
             selected_creature_type.0 = selected_type_index;
 
-            if ui.button("Add New Creature Type").clicked() {
-                let new_creature_type = CreatureType(all_factors.factors.len());
-                all_factors
-                    .factors
-                    .insert(new_creature_type, Factors::default());
-                selected_creature_type.0 = new_creature_type.0;
-            }
-
-            // This is so hacky. I hate this. I'm so sorry.
-            if all_factors.factors.len() > 1 && ui.button("Remove Current Creature Type").clicked()
-            {
-                let selected_index = selected_creature_type.0;
-                for (entity, mut creature_type) in creature_query.iter_mut() {
-                    if *creature_type.as_ref() == *selected_creature_type {
-                        commands.entity(entity).despawn();
-                    } else if creature_type.0 > selected_index {
-                        creature_type.0 -= 1;
-                    }
-                }
-
-                for (mut creature_type, mut factors) in
-                    all_factors.factors.drain().collect::<Vec<_>>()
-                {
-                    if creature_type == *selected_creature_type {
-                        continue;
-                    } else if creature_type.0 > selected_index {
-                        creature_type.0 -= 1;
-                    }
-                    factors.predator_of.remove(&selected_creature_type);
-                    for mut prey in factors.predator_of.drain().collect::<Vec<_>>() {
-                        if prey == *selected_creature_type {
-                            continue;
-                        } else if prey.0 > selected_index {
-                            prey.0 -= 1;
+            ui.horizontal(|ui| {
+                // This is so hacky. I hate this. I'm so sorry.
+                if all_factors.factors.len() > 1 && ui.button("Remove Selected").clicked() {
+                    let selected_index = selected_creature_type.0;
+                    for (entity, mut creature_type) in creature_query.iter_mut() {
+                        if *creature_type.as_ref() == *selected_creature_type {
+                            commands.entity(entity).despawn();
+                        } else if creature_type.0 > selected_index {
+                            creature_type.0 -= 1;
                         }
-                        factors.predator_of.insert(prey);
                     }
-                    all_factors.factors.insert(creature_type, factors);
+
+                    for (mut creature_type, mut factors) in
+                        all_factors.factors.drain().collect::<Vec<_>>()
+                    {
+                        if creature_type == *selected_creature_type {
+                            continue;
+                        } else if creature_type.0 > selected_index {
+                            creature_type.0 -= 1;
+                        }
+                        factors.predator_of.remove(&selected_creature_type);
+                        for mut prey in factors.predator_of.drain().collect::<Vec<_>>() {
+                            if prey == *selected_creature_type {
+                                continue;
+                            } else if prey.0 > selected_index {
+                                prey.0 -= 1;
+                            }
+                            factors.predator_of.insert(prey);
+                        }
+                        all_factors.factors.insert(creature_type, factors);
+                    }
+                    selected_creature_type.0 =
+                        selected_creature_type.0.min(all_factors.factors.len() - 1);
                 }
-                selected_creature_type.0 =
-                    selected_creature_type.0.min(all_factors.factors.len() - 1);
-            }
+
+                if ui.button("Add New").clicked() {
+                    let new_creature_type = CreatureType(all_factors.factors.len());
+                    all_factors
+                        .factors
+                        .insert(new_creature_type, Factors::default());
+                    selected_creature_type.0 = new_creature_type.0;
+                }
+            });
 
             ui.separator();
 
@@ -290,39 +293,74 @@ fn factors_system(
                 ui.label("Color");
             });
 
-            ui.add(egui::Slider::new(&mut factors.speed, 20.0..=200.0).text("Speed"));
-            ui.add(egui::Slider::new(&mut factors.alignment, 0.0..=20.0).text("Alignment"));
-            ui.add(egui::Slider::new(&mut factors.cohesion, 0.0..=20.0).text("Cohesion"));
-            ui.add(egui::Slider::new(&mut factors.separation, 0.0..=20.0).text("Separation"));
-            ui.add(
-                egui::Slider::new(&mut factors.collision_avoidance, 0.0..=20.0)
-                    .text("Collision Avoidance"),
-            );
-            ui.add(egui::Slider::new(&mut factors.scare, 0.0..=20.0).text("Scare"));
-            ui.add(egui::Slider::new(&mut factors.chase, 0.0..=20.0).text("Chase"));
-            ui.add(egui::Slider::new(&mut factors.vision, 10.0..=200.0).text("Vision"));
-            ui.add(egui::Slider::new(&mut factors.size.x, 0.5..=50.0).text("Width"));
-            ui.add(egui::Slider::new(&mut factors.size.y, 0.5..=50.0).text("Length"));
+            ui.add(egui::Slider::new(&mut factors.speed, 5.0..=200.0).text("Speed"));
+            ui.add(egui::Slider::new(&mut factors.vision, 5.0..=100.0).text("Vision"));
+            ui.add(egui::Slider::new(&mut factors.size, 0.5..=10.0).text("Size"));
             ui.add(egui::Slider::new(&mut factors.max_energy, 20.0..=200.0).text("Max Energy"));
             ui.add(
                 egui::Slider::new(&mut factors.fertility_cooldown, 1.0..=60.0)
                     .text("Fertility Cooldown"),
             );
 
-            ui.collapsing("Predator of", |ui| {
-                for &other_creature_type in all_creature_types.iter() {
-                    if selected_creature_type == other_creature_type {
-                        continue;
+            ui.collapsing("Boids System", |ui| {
+                ui.add(egui::Slider::new(&mut factors.alignment, 0.0..=20.0).text("Alignment"));
+                ui.add(egui::Slider::new(&mut factors.cohesion, 0.0..=10.0).text("Cohesion"));
+                ui.add(egui::Slider::new(&mut factors.separation, 0.0..=20.0).text("Separation"));
+                ui.add(
+                    egui::Slider::new(&mut factors.collision_avoidance, 0.0..=20.0)
+                        .text("Collision Avoidance"),
+                );
+            });
+
+            drop(factors);
+            ui.collapsing("Predator/Prey (Chase/Run) System", |ui| {
+                let factors = all_factors
+                    .factors
+                    .get_mut(&selected_creature_type)
+                    .unwrap();
+
+                ui.label(concat!(
+                    "You can be both predator and prey to another type. ",
+                    "If both, running/chasing is determined by your run/chase factor. ",
+                    "On contact and w/ killing, whomever has more energy shall prevail."
+                ));
+
+                ui.add(egui::Slider::new(&mut factors.chase, 0.0..=20.0).text("Chase"));
+                ui.add(egui::Slider::new(&mut factors.scare, 0.0..=20.0).text("Scare"));
+
+                ui.collapsing("Predator of", |ui| {
+                    for &other_creature_type in all_creature_types.iter() {
+                        if selected_creature_type == other_creature_type {
+                            continue;
+                        }
+                        let mut is_predator_of_other =
+                            factors.predator_of.contains(&other_creature_type);
+                        ui.checkbox(&mut is_predator_of_other, other_creature_type.to_string());
+                        if is_predator_of_other {
+                            factors.predator_of.insert(other_creature_type.clone());
+                        } else {
+                            factors.predator_of.remove(&other_creature_type);
+                        }
                     }
-                    let mut is_predator_of_other =
-                        factors.predator_of.contains(&other_creature_type);
-                    ui.checkbox(&mut is_predator_of_other, other_creature_type.to_string());
-                    if is_predator_of_other {
-                        factors.predator_of.insert(other_creature_type);
-                    } else {
-                        factors.predator_of.remove(&other_creature_type);
+                });
+
+                ui.collapsing("Prey of", |ui| {
+                    for &other_creature_type in all_creature_types.iter() {
+                        let other_factors =
+                            all_factors.factors.get_mut(&other_creature_type).unwrap();
+                        if selected_creature_type == other_creature_type {
+                            continue;
+                        }
+                        let mut is_scared_of_other =
+                            other_factors.predator_of.contains(&selected_creature_type);
+                        ui.checkbox(&mut is_scared_of_other, other_creature_type.to_string());
+                        if is_scared_of_other {
+                            other_factors.predator_of.insert(selected_creature_type);
+                        } else {
+                            other_factors.predator_of.remove(&selected_creature_type);
+                        }
                     }
-                }
+                });
             });
         });
 }

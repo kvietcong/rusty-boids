@@ -55,7 +55,7 @@ pub struct Factors {
     pub color: Color,
     pub speed: f32,
     pub vision: f32,
-    pub size: Vec2,
+    pub size: f32,
     pub cohesion: f32,
     pub separation: f32,
     pub alignment: f32,
@@ -73,7 +73,7 @@ impl Default for Factors {
             color: Color::PINK,
             speed: 70.0,
             vision: 15.0,
-            size: Vec2::new(2.0, 6.0),
+            size: 6.0,
             cohesion: 1.0,
             separation: 1.0,
             alignment: 3.0,
@@ -266,7 +266,7 @@ fn spawn_creature(
         .spawn(SpriteBundle {
             sprite: Sprite {
                 color: factors.color,
-                custom_size: Some(factors.size),
+                custom_size: Some(Vec2::splat(factors.size)),
                 ..Sprite::default()
             },
             transform: Transform {
@@ -456,7 +456,7 @@ fn flocking_system(
                                 half_vision_count += 1;
                                 average_close_position += position_b;
                             }
-                            if distance <= factors_a.size.max_element() * 2.0 {
+                            if distance <= factors_a.size * 2.0 {
                                 let away_direction = (position_a - position_b).normalize();
                                 apply_force_event_handler
                                     .lock()
@@ -558,7 +558,7 @@ fn update_factors_system(
         for (creature_type, mut sprite) in creature_query.iter_mut() {
             let factors = factor_info.factors.get(creature_type).unwrap();
             sprite.color = factors.color;
-            sprite.custom_size = Some(factors.size);
+            sprite.custom_size = Some(Vec2::splat(factors.size));
         }
     }
 }
@@ -680,7 +680,7 @@ fn kill_system(
         let position_a = transform_a.translation.xy();
         let factors_a = factor_info.factors.get(type_a).unwrap();
 
-        for entity_b in hash_grid.get_nearby_entities(position_a, factors_a.vision) {
+        for entity_b in hash_grid.get_nearby_entities(position_a, factors_a.size) {
             if entity_b == entity_a {
                 continue;
             }
@@ -689,16 +689,26 @@ fn kill_system(
                 Err(_) => continue,
             };
             let factors_b = factor_info.factors.get(type_b).unwrap();
-            if position_a.distance(position_b)
-                <= factors_a.size.min_element() + factors_b.size.min_element()
-                && factors_a.predator_of.contains(type_b)
-            {
-                let (killed_entity, killer_entity) =
-                    if factors_b.predator_of.contains(type_a) && energy_a < energy_b {
+
+            let is_a_predator = factors_a.predator_of.contains(type_b);
+            let is_b_predator = factors_b.predator_of.contains(type_a);
+            if position_a.distance(position_b) <= factors_a.size + factors_b.size {
+                // This ternary is disgusting
+                let (killed_entity, killer_entity) = if is_a_predator && is_b_predator {
+                    if energy_a > energy_b {
                         (entity_a, entity_b)
-                    } else {
+                    } else if energy_a > energy_b {
                         (entity_b, entity_a)
-                    };
+                    } else {
+                        continue;
+                    }
+                } else if is_a_predator {
+                    (entity_b, entity_a)
+                } else if is_b_predator {
+                    (entity_a, entity_b)
+                } else {
+                    continue;
+                };
                 energy_change_event_handler.send(EnergyChangeEvent(killer_entity, 4.0));
                 commands.entity(killed_entity).despawn();
             }
@@ -732,7 +742,7 @@ fn reproduction_system(
                 Ok(creature) => (creature.1.translation.xy(), creature.2),
                 Err(_) => continue,
             };
-            if position_a.distance(position_b) <= factors.size.max_element() * 2.0
+            if position_a.distance(position_b) <= factors.size * 2.0
                 && type_a == type_b
                 && !reproducers.contains(&entity_a)
                 && !reproducers.contains(&entity_b)
@@ -817,10 +827,10 @@ impl Default for BoidsPlugin {
         initial_factors.insert(
             CreatureType(0),
             Factors {
-                color: Color::WHITE,
+                color: Color::CYAN,
                 speed: 70.0,
                 vision: 20.0,
-                size: Vec2::new(1.0, 4.0),
+                size: 1.0,
                 cohesion: 1.0,
                 separation: 1.0,
                 alignment: 3.0,
@@ -843,7 +853,7 @@ impl Default for BoidsPlugin {
                 color: Color::RED,
                 speed: 60.0,
                 vision: 30.0,
-                size: Vec2::new(4.0, 8.0),
+                size: 3.0,
                 cohesion: 0.5,
                 separation: 0.5,
                 alignment: 2.0,
@@ -862,10 +872,10 @@ impl Default for BoidsPlugin {
         initial_factors.insert(
             CreatureType(2),
             Factors {
-                color: Color::GOLD,
+                color: Color::WHITE,
                 speed: 65.0,
                 vision: 25.0,
-                size: Vec2::new(2.0, 6.0),
+                size: 2.0,
                 cohesion: 0.75,
                 separation: 0.75,
                 alignment: 2.5,
@@ -913,11 +923,7 @@ impl Plugin for BoidsPlugin {
                 .in_set(OnUpdate(SimState::Running)),
         )
         .add_systems(
-            (
-                flocking_system,
-                energy_drain_system,
-                reproduction_system,
-            )
+            (flocking_system, energy_drain_system, reproduction_system)
                 .in_set(SystemStages::Calculate)
                 .in_set(OnUpdate(SimState::Running)),
         )
