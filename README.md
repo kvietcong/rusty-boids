@@ -10,4 +10,3 @@ Some Goals Right Now:
     - Or replace Bevy's Renderer as I don't need all that power. I can just keep the ECS.
 - Add killing between the creature groups.
 - Add more parameters to tweak around.
-- Add ability to mate and reproduce.

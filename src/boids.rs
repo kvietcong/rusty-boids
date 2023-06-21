@@ -1,5 +1,3 @@
-use std::sync::{Arc, Mutex};
-
 use bevy::{
     input::mouse::MouseButtonInput,
     math::Vec3Swizzles,
@@ -18,7 +16,6 @@ pub struct Features {
     pub running: bool,
     pub killing: bool,
     pub flocking: bool,
-    pub reproduction: bool,
     pub energy_draining: bool,
 }
 
@@ -29,7 +26,6 @@ impl Default for Features {
             running: true,
             flocking: true,
             killing: false,
-            reproduction: false,
             energy_draining: false,
         }
     }
@@ -63,7 +59,6 @@ pub struct Factors {
     pub scare: f32,
     pub chase: f32,
     pub max_energy: f32,
-    pub fertility_cooldown: f32,
     pub predator_of: HashSet<CreatureType>,
 }
 
@@ -81,7 +76,6 @@ impl Default for Factors {
             scare: 5.0,
             chase: 5.0,
             max_energy: 100.0,
-            fertility_cooldown: 15.0,
             predator_of: HashSet::default(),
         }
     }
@@ -161,12 +155,6 @@ impl Direction {
     fn lerp(&mut self, other: Vec2, t: f32) {
         self.0 = self.0.lerp(other, t).normalize();
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Component)]
-pub struct Fertility {
-    pub time_till_fertile: f32,
-    pub amount: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Component, PartialOrd)]
@@ -278,10 +266,6 @@ fn spawn_creature(
         })
         .insert(Direction(direction_vector))
         .insert(Energy(factors.max_energy))
-        .insert(Fertility {
-            time_till_fertile: factors.fertility_cooldown,
-            amount: 1,
-        })
         .insert(creature_type);
 }
 
@@ -394,7 +378,7 @@ fn wrap_borders_system(
 
 fn flocking_system(
     creatures: Query<(Entity, &Direction, &Transform, &CreatureType)>,
-    apply_force_event_handler: EventWriter<ApplyForceEvent>,
+    mut force_writer: EventWriter<ApplyForceEvent>,
     factor_info: Res<FactorInfo>,
     hash_grid: Res<HashGrid>,
     features: Res<Features>,
@@ -405,149 +389,144 @@ fn flocking_system(
 
     let compute_task_pool = ComputeTaskPool::get();
     let creature_vec = creatures.iter().collect::<Vec<_>>();
-    let creatures_per_thread = creature_vec.len() / compute_task_pool.thread_num();
-    if creatures_per_thread == 0 {
+    if creature_vec.len() == 0 {
         return;
     }
+    let creatures_per_thread = (creature_vec.len() / compute_task_pool.thread_num()) + 1;
 
-    let features = &features;
-    let hash_grid = &hash_grid;
-    let creatures = &creatures;
-    let factor_info = &factor_info;
-    let apply_force_event_handler = Arc::new(Mutex::new(apply_force_event_handler));
+    for event in compute_task_pool
+        .scope(|scope| {
+            let features = &features;
+            let hash_grid = &hash_grid;
+            let factor_info = &factor_info;
+            let creatures = &creatures;
+            for chunk in creature_vec.chunks(creatures_per_thread) {
+                scope.spawn(async move {
+                    let mut events = vec![];
+                    for (entity_a, _, transform_a, type_a) in chunk {
+                        let entity_a = *entity_a;
+                        let type_a = *type_a;
+                        let factors_a = factor_info.factors.get(type_a).unwrap();
+                        let position_a = transform_a.translation.xy();
 
-    compute_task_pool.scope(|scope| {
-        for chunk in creature_vec.chunks(creatures_per_thread) {
-            let apply_force_event_handler = apply_force_event_handler.clone();
-            scope.spawn(async move {
-                for (entity_a, _, transform_a, type_a) in chunk {
-                    let entity_a = *entity_a;
-                    let type_a = *type_a;
-                    let factors_a = factor_info.factors.get(type_a).unwrap();
-                    let position_a = transform_a.translation.xy();
+                        let mut average_position = Vec2::ZERO; // Cohesion
+                        let mut average_direction = Vec2::ZERO; // Alignment
+                        let mut average_close_position = Vec2::ZERO; // Separation
 
-                    let mut average_position = Vec2::ZERO; // Cohesion
-                    let mut average_direction = Vec2::ZERO; // Alignment
-                    let mut average_close_position = Vec2::ZERO; // Separation
+                        let mut vision_count = 0;
+                        let mut half_vision_count = 0;
+                        let mut closest_target = (0.0, None);
 
-                    let mut vision_count = 0;
-                    let mut half_vision_count = 0;
-                    let mut closest_target = (0.0, None);
+                        for entity_b in hash_grid.get_nearby_entities(position_a, factors_a.vision)
+                        {
+                            let (_, direction_b, transform_b, type_b) = if entity_a != entity_b {
+                                let Ok(creature) = creatures.get(entity_b) else { continue; };
+                                creature
+                            } else {
+                                continue;
+                            };
 
-                    for entity_b in hash_grid.get_nearby_entities(position_a, factors_a.vision) {
-                        let (_, direction_b, transform_b, type_b) = if entity_a != entity_b {
-                            let Ok(creature) = creatures.get(entity_b) else { continue; };
-                            creature
-                        } else {
-                            continue;
-                        };
+                            let position_b = transform_b.translation.xy();
+                            let distance = position_a.distance(position_b);
 
-                        let position_b = transform_b.translation.xy();
-                        let distance = position_a.distance(position_b);
-
-                        // Flocking
-                        if type_a == type_b && features.flocking {
-                            if distance <= factors_a.vision {
-                                vision_count += 1;
-                                average_position += position_b;
-                                average_direction += direction_b.0;
-                            }
-                            if distance <= factors_a.vision / 2.0 {
-                                half_vision_count += 1;
-                                average_close_position += position_b;
-                            }
-                            if distance <= factors_a.size * 2.0 {
-                                let away_direction = (position_a - position_b).normalize();
-                                apply_force_event_handler
-                                    .lock()
-                                    .unwrap()
-                                    .send(ApplyForceEvent(
+                            // Flocking
+                            if features.flocking && type_a == type_b {
+                                if distance <= factors_a.vision {
+                                    vision_count += 1;
+                                    average_position += position_b;
+                                    average_direction += direction_b.0;
+                                }
+                                if distance <= factors_a.vision / 2.0 {
+                                    half_vision_count += 1;
+                                    average_close_position += position_b;
+                                }
+                                if distance <= factors_a.size * 2.0 {
+                                    let away_direction = (position_a - position_b).normalize();
+                                    events.push(ApplyForceEvent(
                                         entity_a,
                                         away_direction,
                                         factors_a.collision_avoidance,
                                     ));
+                                }
+                                continue;
                             }
-                        }
 
-                        // Chase
-                        if factors_a.predator_of.contains(&type_b) && features.chasing {
-                            if distance <= factors_a.vision {
-                                closest_target = match closest_target {
-                                    (_, None) => (distance, Some(position_b)),
-                                    (old_distance, Some(_)) => {
-                                        if old_distance > distance {
-                                            (distance, Some(position_b))
-                                        } else {
-                                            closest_target
-                                        }
-                                    }
-                                };
-                            }
-                        }
-
-                        // Run
-                        if features.running {
-                            let factors_b = factor_info.factors.get(type_b).unwrap();
-                            if factors_b.predator_of.contains(&type_a) {
+                            // Chase
+                            if features.chasing && factors_a.predator_of.contains(&type_b) {
                                 if distance <= factors_a.vision {
-                                    let run_direction = (position_a - position_b).normalize();
-                                    apply_force_event_handler.lock().unwrap().send(
-                                        ApplyForceEvent(entity_a, run_direction, factors_a.scare),
-                                    );
+                                    closest_target = match closest_target {
+                                        (_, None) => (distance, Some(position_b)),
+                                        (old_distance, Some(_)) => {
+                                            if old_distance > distance {
+                                                (distance, Some(position_b))
+                                            } else {
+                                                closest_target
+                                            }
+                                        }
+                                    };
+                                }
+                            }
+
+                            // Run
+                            if features.running {
+                                let factors_b = factor_info.factors.get(type_b).unwrap();
+                                if factors_b.predator_of.contains(&type_a) {
+                                    if distance <= factors_a.vision {
+                                        let run_direction = (position_a - position_b).normalize();
+                                        events.push(ApplyForceEvent(
+                                            entity_a,
+                                            run_direction,
+                                            factors_a.scare,
+                                        ));
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    if vision_count > 0 && features.flocking {
-                        average_position /= vision_count as f32;
-                        average_direction /= vision_count as f32;
-                        let cohesion_force =
-                            (average_position - transform_a.translation.xy()).normalize();
-                        apply_force_event_handler
-                            .lock()
-                            .unwrap()
-                            .send(ApplyForceEvent(
+                        if vision_count > 0 && features.flocking {
+                            average_position /= vision_count as f32;
+                            average_direction /= vision_count as f32;
+                            let cohesion_force =
+                                (average_position - transform_a.translation.xy()).normalize();
+                            events.push(ApplyForceEvent(
                                 entity_a,
                                 cohesion_force,
                                 factors_a.cohesion,
                             ));
-                        apply_force_event_handler
-                            .lock()
-                            .unwrap()
-                            .send(ApplyForceEvent(
+                            events.push(ApplyForceEvent(
                                 entity_a,
                                 average_direction.normalize(),
                                 factors_a.alignment,
                             ));
-                    }
-                    if half_vision_count > 0 && features.flocking {
-                        average_close_position /= half_vision_count as f32;
-                        let separation_force = (position_a - average_close_position).normalize();
-                        apply_force_event_handler
-                            .lock()
-                            .unwrap()
-                            .send(ApplyForceEvent(
+                        }
+                        if half_vision_count > 0 && features.flocking {
+                            average_close_position /= half_vision_count as f32;
+                            let separation_force =
+                                (position_a - average_close_position).normalize();
+                            events.push(ApplyForceEvent(
                                 entity_a,
                                 separation_force,
                                 factors_a.separation,
                             ));
-                    }
+                        }
 
-                    // Chase
-                    let closest_position = match closest_target {
-                        (_, Some(position)) => position,
-                        (_, None) => continue,
-                    };
-                    let chase_direction = (closest_position - position_a).normalize();
-                    apply_force_event_handler
-                        .lock()
-                        .unwrap()
-                        .send(ApplyForceEvent(entity_a, chase_direction, factors_a.chase));
-                }
-            });
-        }
-    });
+                        // Chase
+                        let closest_position = match closest_target {
+                            (_, Some(position)) => position,
+                            (_, None) => continue,
+                        };
+                        let chase_direction = (closest_position - position_a).normalize();
+                        events.push(ApplyForceEvent(entity_a, chase_direction, factors_a.chase));
+                    }
+                    events
+                });
+            }
+        })
+        .into_iter()
+        .flatten()
+    {
+        force_writer.send(event);
+    }
 }
 
 fn update_factors_system(
@@ -564,12 +543,12 @@ fn update_factors_system(
 }
 
 fn apply_forces_system(
-    mut apply_force_event_handler: EventReader<ApplyForceEvent>,
+    mut force_reader: EventReader<ApplyForceEvent>,
     mut creature_query: Query<&mut Direction>,
     timer: Res<Time>,
 ) {
     let delta_time = timer.delta_seconds();
-    for ApplyForceEvent(entity, force, factor) in apply_force_event_handler.iter() {
+    for ApplyForceEvent(entity, force, factor) in force_reader.iter() {
         if let Ok(mut direction) = creature_query.get_mut(*entity) {
             direction.lerp(*force, factor * delta_time);
         }
@@ -716,72 +695,6 @@ fn kill_system(
     });
 }
 
-fn reproduction_system(
-    timer: Res<Time>,
-    mut commands: Commands,
-    features: Res<Features>,
-    hash_grid: Res<HashGrid>,
-    factor_info: Res<FactorInfo>,
-    mut energy_change_event_handler: EventWriter<EnergyChangeEvent>,
-    mut creatures: Query<(Entity, &Transform, &CreatureType, &mut Fertility)>,
-) {
-    if !features.reproduction {
-        return;
-    }
-    let mut reproducers = HashSet::default();
-    reproducers.reserve(1000);
-    creatures.for_each(|(entity_a, transform_a, type_a, fertility)| {
-        let position_a = transform_a.translation.xy();
-        let factors = factor_info.factors.get(type_a).unwrap();
-
-        for entity_b in hash_grid.get_nearby_entities(position_a, factors.vision) {
-            if entity_b == entity_a {
-                continue;
-            }
-            let (position_b, type_b) = match creatures.get(entity_b) {
-                Ok(creature) => (creature.1.translation.xy(), creature.2),
-                Err(_) => continue,
-            };
-            if position_a.distance(position_b) <= factors.size * 2.0
-                && type_a == type_b
-                && !reproducers.contains(&entity_a)
-                && !reproducers.contains(&entity_b)
-                && fertility.time_till_fertile <= 0.0
-            {
-                let spawn_radius = 15.0;
-                for _ in 0..fertility.amount {
-                    spawn_creature_randomly(
-                        None,
-                        &mut commands,
-                        *type_a,
-                        &factor_info.factors,
-                        position_a.x - spawn_radius,
-                        position_a.x + spawn_radius,
-                        position_a.y - spawn_radius,
-                        position_a.y + spawn_radius,
-                    );
-                }
-                reproducers.insert(entity_a);
-                energy_change_event_handler.send(EnergyChangeEvent(entity_a, -15.0));
-            }
-        }
-    });
-
-    let delta_seconds = timer.delta_seconds();
-    creatures.for_each_mut(|(entity, _, creature_type, mut fertility)| {
-        if reproducers.contains(&entity) {
-            fertility.time_till_fertile = factor_info
-                .factors
-                .get(creature_type)
-                .unwrap()
-                .fertility_cooldown;
-        } else {
-            fertility.time_till_fertile -= delta_seconds;
-            fertility.time_till_fertile = fertility.time_till_fertile.max(0.0);
-        }
-    });
-}
-
 fn energy_drain_system(
     timer: Res<Time>,
     features: Res<Features>,
@@ -829,16 +742,15 @@ impl Default for BoidsPlugin {
             Factors {
                 color: Color::CYAN,
                 speed: 70.0,
-                vision: 20.0,
+                vision: 15.0,
                 size: 1.0,
-                cohesion: 1.0,
-                separation: 1.0,
-                alignment: 3.0,
-                collision_avoidance: 3.5,
-                scare: 10.0,
+                cohesion: 6.0,
+                separation: 12.0,
+                alignment: 16.0,
+                collision_avoidance: 6.0,
+                scare: 30.0,
                 chase: 0.0,
                 max_energy: 50.0,
-                fertility_cooldown: 10.0,
                 predator_of: HashSet::default(),
                 ..Default::default()
             },
@@ -851,17 +763,16 @@ impl Default for BoidsPlugin {
             CreatureType(1),
             Factors {
                 color: Color::RED,
-                speed: 60.0,
+                speed: 55.0,
                 vision: 30.0,
                 size: 3.0,
-                cohesion: 0.5,
-                separation: 0.5,
-                alignment: 2.0,
+                cohesion: 3.0,
+                separation: 10.0,
+                alignment: 10.0,
                 collision_avoidance: 2.0,
                 scare: 0.0,
-                chase: 2.0,
+                chase: 15.0,
                 max_energy: 35.0,
-                fertility_cooldown: 20.0,
                 predator_of: b_predator_of,
                 ..Default::default()
             },
@@ -873,17 +784,16 @@ impl Default for BoidsPlugin {
             CreatureType(2),
             Factors {
                 color: Color::WHITE,
-                speed: 65.0,
+                speed: 64.0,
                 vision: 25.0,
                 size: 2.0,
-                cohesion: 0.75,
-                separation: 0.75,
-                alignment: 2.5,
+                cohesion: 4.0,
+                separation: 8.0,
+                alignment: 10.0,
                 collision_avoidance: 3.0,
-                scare: 5.0,
-                chase: 1.0,
+                scare: 10.0,
+                chase: 10.0,
                 max_energy: 50.0,
-                fertility_cooldown: 15.0,
                 predator_of: c_predator_of,
                 ..Default::default()
             },
@@ -904,18 +814,22 @@ impl Plugin for BoidsPlugin {
         .insert_resource(CreatureType::default())
         .insert_resource(DespawnProperties::default())
         .insert_resource(SpawnProperties::default())
+        .insert_resource(FixedTime::new_from_secs(1.0 / 30.0))
         .add_event::<ApplyForceEvent>()
         .add_event::<EnergyChangeEvent>()
         .add_state::<SimState>()
         .add_plugin(UiPlugin::default())
         .add_startup_system(setup_creatures)
-        .configure_sets((
-            SystemStages::Spawn,
-            SystemStages::Calculate,
-            SystemStages::Apply,
-            SystemStages::Act,
-            SystemStages::Cache,
-        ))
+        .configure_sets(
+            (
+                SystemStages::Spawn,
+                SystemStages::Calculate,
+                SystemStages::Apply,
+                SystemStages::Act,
+                SystemStages::Cache,
+            )
+                .chain(),
+        )
         .add_systems((update_factors_system, pause_system))
         .add_systems(
             (despawn_system, spawn_system, kill_system)
@@ -923,9 +837,10 @@ impl Plugin for BoidsPlugin {
                 .in_set(OnUpdate(SimState::Running)),
         )
         .add_systems(
-            (flocking_system, energy_drain_system, reproduction_system)
+            (flocking_system, energy_drain_system)
                 .in_set(SystemStages::Calculate)
-                .in_set(OnUpdate(SimState::Running)),
+                .in_set(OnUpdate(SimState::Running))
+                .in_schedule(CoreSchedule::FixedUpdate),
         )
         .add_systems(
             (apply_forces_system, apply_energy_change_system)

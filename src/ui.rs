@@ -162,7 +162,6 @@ fn settings_system(
                 ui.checkbox(&mut features.running, "Running");
                 ui.checkbox(&mut features.flocking, "Flocking");
                 ui.checkbox(&mut features.killing, "Killing");
-                ui.checkbox(&mut features.reproduction, "Reproduction");
                 ui.checkbox(&mut features.energy_draining, "Energy Draining");
             });
 
@@ -297,17 +296,13 @@ fn factors_system(
             ui.add(egui::Slider::new(&mut factors.vision, 5.0..=100.0).text("Vision"));
             ui.add(egui::Slider::new(&mut factors.size, 0.5..=10.0).text("Size"));
             ui.add(egui::Slider::new(&mut factors.max_energy, 20.0..=200.0).text("Max Energy"));
-            ui.add(
-                egui::Slider::new(&mut factors.fertility_cooldown, 1.0..=60.0)
-                    .text("Fertility Cooldown"),
-            );
 
             ui.collapsing("Boids System", |ui| {
-                ui.add(egui::Slider::new(&mut factors.alignment, 0.0..=20.0).text("Alignment"));
-                ui.add(egui::Slider::new(&mut factors.cohesion, 0.0..=10.0).text("Cohesion"));
-                ui.add(egui::Slider::new(&mut factors.separation, 0.0..=20.0).text("Separation"));
+                ui.add(egui::Slider::new(&mut factors.alignment, 0.0..=50.0).text("Alignment"));
+                ui.add(egui::Slider::new(&mut factors.cohesion, 0.0..=50.0).text("Cohesion"));
+                ui.add(egui::Slider::new(&mut factors.separation, 0.0..=50.0).text("Separation"));
                 ui.add(
-                    egui::Slider::new(&mut factors.collision_avoidance, 0.0..=20.0)
+                    egui::Slider::new(&mut factors.collision_avoidance, 0.0..=50.0)
                         .text("Collision Avoidance"),
                 );
             });
@@ -325,8 +320,8 @@ fn factors_system(
                     "On contact and w/ killing, whomever has more energy shall prevail."
                 ));
 
-                ui.add(egui::Slider::new(&mut factors.chase, 0.0..=20.0).text("Chase"));
-                ui.add(egui::Slider::new(&mut factors.scare, 0.0..=20.0).text("Scare"));
+                ui.add(egui::Slider::new(&mut factors.chase, 0.0..=50.0).text("Chase"));
+                ui.add(egui::Slider::new(&mut factors.scare, 0.0..=50.0).text("Scare"));
 
                 ui.collapsing("Predator of", |ui| {
                     for &other_creature_type in all_creature_types.iter() {

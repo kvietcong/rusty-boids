@@ -7,6 +7,3 @@ edition = "2021"
 bevy = "0.10"
 rand = "0.8"
 bevy_egui = "0.20"
-
-[profile.release]
-debug = true

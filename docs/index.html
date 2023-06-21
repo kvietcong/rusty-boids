@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <title>Le Boids - Bevy + WASM</title>
@@ -27,7 +28,12 @@
                 <br>
 
                 If the simulation is laggy, please turn on hardware acceleration
-                as the simulation performance heavily relies on it!`;
+                as the simulation performance heavily relies on it!
+
+                <br>
+
+                The sim doesn't work when out of focus. Refresh the page if you did go out of focus.
+            `;
             container.appendChild(description);
 
             const simulation = document.getElementsByTagName("canvas")[0];
@@ -83,9 +89,11 @@
         }
     </style>
 </head>
+
 <body>
     <main>
         <h1>Welcome to KV Le's Boids (Flocking) Simulation</h1>
     </main>
 </body>
+
 </html>
