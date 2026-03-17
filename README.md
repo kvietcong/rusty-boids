@@ -1,5 +1,8 @@
 # 💻 🦀 rusty-boids 🐟 🐦
-Using Rust and the Bevy game engine to make a simple boids simulation.
+
+![rusty-boids](https://github.com/user-attachments/assets/87900683-8353-4c9a-a9f5-2c25ba085401)
+
+Using Rust and the Bevy game engine to make a simple boids simulation. See live demo site here: <https://kvietcong.github.io/rusty-boids/>
 
 This is the first time I've messed around with the ECS architecture after watching a few cool talks about it.
 
