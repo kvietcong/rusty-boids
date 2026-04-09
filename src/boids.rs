@@ -409,6 +409,10 @@ fn flocking_system(
                         let factors_a = factor_info.factors.get(type_a).unwrap();
                         let position_a = transform_a.translation.xy();
 
+                        let vision_sq = factors_a.vision.powi(2);
+                        let half_vision_sq = (factors_a.vision / 2.0).powi(2);
+                        let collision_avoidance_threshold_sq = (factors_a.size * 2.0).powi(2);
+
                         let mut average_position = Vec2::ZERO; // Cohesion
                         let mut average_direction = Vec2::ZERO; // Alignment
                         let mut average_close_position = Vec2::ZERO; // Separation
@@ -427,20 +431,20 @@ fn flocking_system(
                             };
 
                             let position_b = transform_b.translation.xy();
-                            let distance = position_a.distance(position_b);
+                            let distance_sq = position_a.distance_squared(position_b);
 
                             // Flocking
                             if features.flocking && type_a == type_b {
-                                if distance <= factors_a.vision {
+                                if distance_sq <= vision_sq {
                                     vision_count += 1;
                                     average_position += position_b;
                                     average_direction += direction_b.0;
                                 }
-                                if distance <= factors_a.vision / 2.0 {
+                                if distance_sq <= half_vision_sq {
                                     half_vision_count += 1;
                                     average_close_position += position_b;
                                 }
-                                if distance <= factors_a.size * 2.0 {
+                                if distance_sq <= collision_avoidance_threshold_sq {
                                     let away_direction = (position_a - position_b).normalize();
                                     events.push(ApplyForceEvent(
                                         entity_a,
@@ -453,12 +457,12 @@ fn flocking_system(
 
                             // Chase
                             if features.chasing && factors_a.predator_of.contains(&type_b) {
-                                if distance <= factors_a.vision {
+                                if distance_sq <= vision_sq {
                                     closest_target = match closest_target {
-                                        (_, None) => (distance, Some(position_b)),
-                                        (old_distance, Some(_)) => {
-                                            if old_distance > distance {
-                                                (distance, Some(position_b))
+                                        (_, None) => (distance_sq, Some(position_b)),
+                                        (old_distance_sq, Some(_)) => {
+                                            if old_distance_sq > distance_sq {
+                                                (distance_sq, Some(position_b))
                                             } else {
                                                 closest_target
                                             }
@@ -471,7 +475,7 @@ fn flocking_system(
                             if features.running {
                                 let factors_b = factor_info.factors.get(type_b).unwrap();
                                 if factors_b.predator_of.contains(&type_a) {
-                                    if distance <= factors_a.vision {
+                                    if distance_sq <= vision_sq {
                                         let run_direction = (position_a - position_b).normalize();
                                         events.push(ApplyForceEvent(
                                             entity_a,
@@ -671,7 +675,7 @@ fn kill_system(
 
             let is_a_predator = factors_a.predator_of.contains(type_b);
             let is_b_predator = factors_b.predator_of.contains(type_a);
-            if position_a.distance(position_b) <= factors_a.size + factors_b.size {
+            if position_a.distance_squared(position_b) <= (factors_a.size + factors_b.size).powi(2) {
                 // This ternary is disgusting
                 let (killed_entity, killer_entity) = if is_a_predator && is_b_predator {
                     if energy_a > energy_b {
