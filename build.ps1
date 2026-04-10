@@ -1,2 +1,2 @@
 # Builds Native and Web versions of rust-boids
-cargo build --release && cargo build --release --target wasm32-unknown-unknown && wasm-bindgen --out-dir .\docs\ --target no-modules .\target\wasm32-unknown-unknown\release\rusty-boids.wasm
+cargo build --release && cargo build --release --target wasm32-unknown-unknown && wasm-bindgen --out-dir .\docs\ --target no-modules .\target\wasm32-unknown-unknown\release\rusty-boids.wasm && Copy-Item -Path ".\assets" -Destination ".\target\release\assets" -Recurse

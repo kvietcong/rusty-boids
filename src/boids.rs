@@ -1,14 +1,11 @@
 use bevy::{
-    input::mouse::MouseButtonInput,
-    math::Vec3Swizzles,
-    prelude::*,
-    tasks::ComputeTaskPool,
-    utils::{HashMap, HashSet},
+    input::mouse::MouseButtonInput, math::Vec3Swizzles, prelude::*, tasks::ComputeTaskPool,
     window::PrimaryWindow,
 };
 use rand::prelude::*;
+use std::collections::{HashMap, HashSet};
 
-use crate::{ui::UiPlugin, Cursor, IS_WASM};
+use crate::{Cursor, IS_WEB};
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Resource)]
 pub struct Features {
@@ -32,9 +29,9 @@ impl Default for Features {
 }
 
 pub const INITIAL_POPULATIONS: [usize; 3] = [
-    if IS_WASM { 500 } else { 1000 },
-    if IS_WASM { 50 } else { 200 },
-    if IS_WASM { 50 } else { 300 },
+    if IS_WEB { 500 } else { 1000 },
+    if IS_WEB { 50 } else { 200 },
+    if IS_WEB { 50 } else { 300 },
 ];
 
 pub const CHUNK_RESOLUTION: usize = 20;
@@ -65,7 +62,7 @@ pub struct Factors {
 impl Default for Factors {
     fn default() -> Self {
         Self {
-            color: Color::PINK,
+            color: Color::from(bevy::color::palettes::css::PINK),
             speed: 70.0,
             vision: 15.0,
             size: 6.0,
@@ -107,15 +104,8 @@ impl Default for DespawnProperties {
     }
 }
 
-// TODO: Maybe generalize this?
-#[derive(Clone, Debug, PartialEq, Copy, Component, Eq, Hash, Resource)]
+#[derive(Clone, Debug, PartialEq, Copy, Component, Eq, Hash, Resource, PartialOrd, Ord)]
 pub struct CreatureType(pub usize);
-
-impl Default for CreatureType {
-    fn default() -> Self {
-        CreatureType(0)
-    }
-}
 
 impl From<usize> for CreatureType {
     fn from(val: usize) -> Self {
@@ -125,7 +115,7 @@ impl From<usize> for CreatureType {
 
 impl std::fmt::Display for CreatureType {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.to_string())
+        write!(f, "Type {}", self.0)
     }
 }
 
@@ -138,7 +128,6 @@ impl CreatureType {
 #[derive(Component, Clone, Debug, PartialEq)]
 struct Direction(Vec2);
 
-// Why no work when adding directly to vec2?
 impl From<Vec2> for Direction {
     fn from(v: Vec2) -> Self {
         Direction(v)
@@ -160,8 +149,10 @@ impl Direction {
 #[derive(Debug, Clone, PartialEq, Component, PartialOrd)]
 pub struct Energy(f32);
 
+#[derive(Message)]
 struct ApplyForceEvent(Entity, Vec2, f32);
 
+#[derive(Message)]
 struct EnergyChangeEvent(Entity, f32);
 
 #[derive(Debug, Resource, Default)]
@@ -190,9 +181,7 @@ impl HashGrid {
         let j = (pos.x / CHUNK_RESOLUTION as f32) as i8;
 
         // Note: `associations` could be extra overhead compared to the entity storing it.
-        if let Some((old_i, old_j)) = self.associations.get(&entity) {
-            let old_i = *old_i;
-            let old_j = *old_j;
+        if let Some(&(old_i, old_j)) = self.associations.get(&entity) {
             if i == old_i && j == old_j {
                 return;
             }
@@ -250,23 +239,21 @@ fn spawn_creature(
     commands: &mut Commands,
 ) {
     let factors = all_factors.get(&creature_type).unwrap();
-    commands
-        .spawn(SpriteBundle {
-            sprite: Sprite {
-                color: factors.color,
-                custom_size: Some(Vec2::splat(factors.size)),
-                ..Sprite::default()
-            },
-            transform: Transform {
-                translation: Vec3::new(x, y, 0.0),
-                rotation: Quat::from_rotation_z(-direction_vector.x.atan2(direction_vector.y)),
-                ..Transform::default()
-            },
-            ..SpriteBundle::default()
-        })
-        .insert(Direction(direction_vector))
-        .insert(Energy(factors.max_energy))
-        .insert(creature_type);
+    commands.spawn((
+        Sprite {
+            color: factors.color,
+            custom_size: Some(Vec2::splat(factors.size)),
+            ..Sprite::default()
+        },
+        Transform {
+            translation: Vec3::new(x, y, 0.0),
+            rotation: Quat::from_rotation_z(-direction_vector.x.atan2(direction_vector.y)),
+            ..Transform::default()
+        },
+        Direction(direction_vector),
+        Energy(factors.max_energy),
+        creature_type,
+    ));
 }
 
 fn spawn_creature_randomly(
@@ -319,7 +306,9 @@ fn setup_creatures(
     factor_info: Res<FactorInfo>,
     primary_query: Query<&Window, With<PrimaryWindow>>,
 ) {
-    let window = primary_query.get_single().unwrap();
+    let Ok(window) = primary_query.single() else {
+        return;
+    };
     let screen_width = window.width();
     let screen_height = window.height();
 
@@ -328,7 +317,7 @@ fn setup_creatures(
         .into_iter()
         .enumerate()
         .for_each(|(index, population_size)| {
-            let creature_type = CreatureType(index);
+            let creature_type = CreatureType(index + 1);
             for _ in 0..population_size {
                 spawn_creature_randomly_on_screen(
                     Some(&mut rng),
@@ -349,8 +338,8 @@ fn move_system(
 ) {
     for (mut transform, direction, creature_type) in query.iter_mut() {
         let speed = factor_info.factors.get(creature_type).unwrap().speed;
-        transform.translation.x += direction.0.x * speed * timer.delta_seconds();
-        transform.translation.y += direction.0.y * speed * timer.delta_seconds();
+        transform.translation.x += direction.0.x * speed * timer.delta_secs();
+        transform.translation.y += direction.0.y * speed * timer.delta_secs();
         transform.rotation = Quat::from_rotation_z(-direction.0.x.atan2(direction.0.y));
     }
 }
@@ -359,7 +348,9 @@ fn wrap_borders_system(
     mut query: Query<&mut Transform>,
     primary_query: Query<&Window, With<PrimaryWindow>>,
 ) {
-    let window = primary_query.get_single().unwrap();
+    let Ok(window) = primary_query.single() else {
+        return;
+    };
     let width = window.width();
     let height = window.height();
     for mut transform in query.iter_mut() {
@@ -378,7 +369,7 @@ fn wrap_borders_system(
 
 fn flocking_system(
     creatures: Query<(Entity, &Direction, &Transform, &CreatureType)>,
-    mut force_writer: EventWriter<ApplyForceEvent>,
+    mut message_writer: MessageWriter<ApplyForceEvent>,
     factor_info: Res<FactorInfo>,
     hash_grid: Res<HashGrid>,
     features: Res<Features>,
@@ -409,6 +400,10 @@ fn flocking_system(
                         let factors_a = factor_info.factors.get(type_a).unwrap();
                         let position_a = transform_a.translation.xy();
 
+                        let vision_sq = factors_a.vision.powi(2);
+                        let half_vision_sq = (factors_a.vision / 2.0).powi(2);
+                        let collision_avoidance_threshold_sq = (factors_a.size * 2.0).powi(2);
+
                         let mut average_position = Vec2::ZERO; // Cohesion
                         let mut average_direction = Vec2::ZERO; // Alignment
                         let mut average_close_position = Vec2::ZERO; // Separation
@@ -420,27 +415,29 @@ fn flocking_system(
                         for entity_b in hash_grid.get_nearby_entities(position_a, factors_a.vision)
                         {
                             let (_, direction_b, transform_b, type_b) = if entity_a != entity_b {
-                                let Ok(creature) = creatures.get(entity_b) else { continue; };
+                                let Ok(creature) = creatures.get(entity_b) else {
+                                    continue;
+                                };
                                 creature
                             } else {
                                 continue;
                             };
 
                             let position_b = transform_b.translation.xy();
-                            let distance = position_a.distance(position_b);
+                            let distance_sq = position_a.distance_squared(position_b);
 
                             // Flocking
                             if features.flocking && type_a == type_b {
-                                if distance <= factors_a.vision {
+                                if distance_sq <= vision_sq {
                                     vision_count += 1;
                                     average_position += position_b;
                                     average_direction += direction_b.0;
                                 }
-                                if distance <= factors_a.vision / 2.0 {
+                                if distance_sq <= half_vision_sq {
                                     half_vision_count += 1;
                                     average_close_position += position_b;
                                 }
-                                if distance <= factors_a.size * 2.0 {
+                                if distance_sq <= collision_avoidance_threshold_sq {
                                     let away_direction = (position_a - position_b).normalize();
                                     events.push(ApplyForceEvent(
                                         entity_a,
@@ -453,12 +450,12 @@ fn flocking_system(
 
                             // Chase
                             if features.chasing && factors_a.predator_of.contains(&type_b) {
-                                if distance <= factors_a.vision {
+                                if distance_sq <= vision_sq {
                                     closest_target = match closest_target {
-                                        (_, None) => (distance, Some(position_b)),
-                                        (old_distance, Some(_)) => {
-                                            if old_distance > distance {
-                                                (distance, Some(position_b))
+                                        (_, None) => (distance_sq, Some(position_b)),
+                                        (old_distance_sq, Some(_)) => {
+                                            if old_distance_sq > distance_sq {
+                                                (distance_sq, Some(position_b))
                                             } else {
                                                 closest_target
                                             }
@@ -471,7 +468,7 @@ fn flocking_system(
                             if features.running {
                                 let factors_b = factor_info.factors.get(type_b).unwrap();
                                 if factors_b.predator_of.contains(&type_a) {
-                                    if distance <= factors_a.vision {
+                                    if distance_sq <= vision_sq {
                                         let run_direction = (position_a - position_b).normalize();
                                         events.push(ApplyForceEvent(
                                             entity_a,
@@ -525,7 +522,7 @@ fn flocking_system(
         .into_iter()
         .flatten()
     {
-        force_writer.send(event);
+        message_writer.write(event);
     }
 }
 
@@ -543,29 +540,28 @@ fn update_factors_system(
 }
 
 fn apply_forces_system(
-    mut force_reader: EventReader<ApplyForceEvent>,
+    mut message_reader: MessageReader<ApplyForceEvent>,
     mut creature_query: Query<&mut Direction>,
     timer: Res<Time>,
 ) {
-    let delta_time = timer.delta_seconds();
-    for ApplyForceEvent(entity, force, factor) in force_reader.iter() {
-        if let Ok(mut direction) = creature_query.get_mut(*entity) {
-            direction.lerp(*force, factor * delta_time);
+    let delta_time = timer.delta_secs();
+    for &ApplyForceEvent(entity, force, factor) in message_reader.read() {
+        if let Ok(mut direction) = creature_query.get_mut(entity) {
+            direction.lerp(force, factor * delta_time);
         }
     }
 }
 
 fn pause_system(
-    keys: Res<Input<KeyCode>>,
+    keys: Res<ButtonInput<KeyCode>>,
     sim_state: Res<State<SimState>>,
     mut next_sim_state: ResMut<NextState<SimState>>,
 ) {
-    if keys.just_pressed(KeyCode::P) {
-        let new_sim_state = match sim_state.0 {
+    if keys.just_pressed(KeyCode::KeyP) {
+        let new_sim_state = match sim_state.get() {
             SimState::Running => SimState::Paused,
             _ => SimState::Running,
         };
-        println!("{:?} to {:?}", sim_state, new_sim_state);
         next_sim_state.set(new_sim_state);
     }
 }
@@ -582,16 +578,16 @@ fn hash_grid_update_system(
 fn spawn_system(
     cursor: Res<Cursor>,
     mut commands: Commands,
-    keys: Res<Input<KeyCode>>,
+    keys: Res<ButtonInput<KeyCode>>,
     factor_info: Res<FactorInfo>,
     spawn_properties: Res<SpawnProperties>,
     selected_creature_type: Res<CreatureType>,
-    mut mouse_button_events: EventReader<MouseButtonInput>,
+    mut mouse_button_messages: MessageReader<MouseButtonInput>,
 ) {
-    for event in mouse_button_events.iter() {
-        if event.button != MouseButton::Left
-            || event.state.is_pressed()
-            || !keys.pressed(KeyCode::LShift)
+    for message in mouse_button_messages.read() {
+        if message.button != MouseButton::Left
+            || message.state.is_pressed()
+            || !keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight])
         {
             continue;
         }
@@ -614,16 +610,16 @@ fn spawn_system(
 fn despawn_system(
     cursor: Res<Cursor>,
     mut commands: Commands,
-    keys: Res<Input<KeyCode>>,
+    keys: Res<ButtonInput<KeyCode>>,
     despawn_properties: Res<DespawnProperties>,
     selected_creature_type: Res<CreatureType>,
-    mut mouse_button_events: EventReader<MouseButtonInput>,
+    mut mouse_button_messages: MessageReader<MouseButtonInput>,
     creatures_query: Query<(Entity, &Transform, &CreatureType)>,
 ) {
-    for event in mouse_button_events.iter() {
-        if event.button != MouseButton::Left
-            || event.state.is_pressed()
-            || !keys.pressed(KeyCode::LControl)
+    for message in mouse_button_messages.read() {
+        if message.button != MouseButton::Left
+            || message.state.is_pressed()
+            || !keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
         {
             continue;
         }
@@ -650,12 +646,12 @@ fn kill_system(
     hash_grid: Res<HashGrid>,
     factor_info: Res<FactorInfo>,
     creatures: Query<(Entity, &Transform, &CreatureType, &Energy)>,
-    mut energy_change_event_handler: EventWriter<EnergyChangeEvent>,
+    mut message_writer: MessageWriter<EnergyChangeEvent>,
 ) {
     if !features.killing {
         return;
     }
-    creatures.for_each(|(entity_a, transform_a, type_a, energy_a)| {
+    for (entity_a, transform_a, type_a, energy_a) in creatures.iter() {
         let position_a = transform_a.translation.xy();
         let factors_a = factor_info.factors.get(type_a).unwrap();
 
@@ -671,13 +667,13 @@ fn kill_system(
 
             let is_a_predator = factors_a.predator_of.contains(type_b);
             let is_b_predator = factors_b.predator_of.contains(type_a);
-            if position_a.distance(position_b) <= factors_a.size + factors_b.size {
-                // This ternary is disgusting
+            if position_a.distance_squared(position_b) <= (factors_a.size + factors_b.size).powi(2)
+            {
                 let (killed_entity, killer_entity) = if is_a_predator && is_b_predator {
                     if energy_a > energy_b {
-                        (entity_a, entity_b)
-                    } else if energy_a > energy_b {
                         (entity_b, entity_a)
+                    } else if energy_b > energy_a {
+                        (entity_a, entity_b)
                     } else {
                         continue;
                     }
@@ -688,37 +684,37 @@ fn kill_system(
                 } else {
                     continue;
                 };
-                energy_change_event_handler.send(EnergyChangeEvent(killer_entity, 4.0));
+                message_writer.write(EnergyChangeEvent(killer_entity, 4.0));
                 commands.entity(killed_entity).despawn();
             }
         }
-    });
+    }
 }
 
 fn energy_drain_system(
     timer: Res<Time>,
     features: Res<Features>,
     creatures: Query<Entity, With<Energy>>,
-    mut energy_change_event_handler: EventWriter<EnergyChangeEvent>,
+    mut message_writer: MessageWriter<EnergyChangeEvent>,
 ) {
     if !features.energy_draining {
         return;
     }
-    let delta_seconds = timer.delta_seconds();
+    let delta_seconds = timer.delta_secs();
     let burn_rate = 2f32;
-    creatures.for_each(|entity| {
-        energy_change_event_handler.send(EnergyChangeEvent(entity, -delta_seconds * burn_rate))
-    });
+    for entity in creatures.iter() {
+        message_writer.write(EnergyChangeEvent(entity, -delta_seconds * burn_rate));
+    }
 }
 
 fn apply_energy_change_system(
     mut commands: Commands,
     factor_info: Res<FactorInfo>,
     mut creature_query: Query<(Entity, &mut Energy, &CreatureType)>,
-    mut energy_change_even_handler: EventReader<EnergyChangeEvent>,
+    mut message_reader: MessageReader<EnergyChangeEvent>,
 ) {
-    for EnergyChangeEvent(entity, change) in energy_change_even_handler.iter() {
-        if let Ok((entity, mut energy, creature_type)) = creature_query.get_mut(*entity) {
+    for &EnergyChangeEvent(entity, change) in message_reader.read() {
+        if let Ok((entity, mut energy, creature_type)) = creature_query.get_mut(entity) {
             let factors = factor_info.factors.get(creature_type).unwrap();
             energy.0 += change;
             energy.0 = energy.0.clamp(0.0, factors.max_energy);
@@ -738,9 +734,9 @@ impl Default for BoidsPlugin {
         let mut initial_factors = HashMap::default();
 
         initial_factors.insert(
-            CreatureType(0),
+            CreatureType(1),
             Factors {
-                color: Color::CYAN,
+                color: Color::from(bevy::color::palettes::css::AQUA),
                 speed: 70.0,
                 vision: 15.0,
                 size: 1.0,
@@ -752,17 +748,16 @@ impl Default for BoidsPlugin {
                 chase: 0.0,
                 max_energy: 50.0,
                 predator_of: HashSet::default(),
-                ..Default::default()
             },
         );
 
         let mut b_predator_of = HashSet::default();
-        b_predator_of.insert(CreatureType(0));
+        b_predator_of.insert(CreatureType(1));
         b_predator_of.insert(CreatureType(2));
         initial_factors.insert(
-            CreatureType(1),
+            CreatureType(2),
             Factors {
-                color: Color::RED,
+                color: Color::from(bevy::color::palettes::css::RED),
                 speed: 55.0,
                 vision: 30.0,
                 size: 3.0,
@@ -774,16 +769,15 @@ impl Default for BoidsPlugin {
                 chase: 15.0,
                 max_energy: 35.0,
                 predator_of: b_predator_of,
-                ..Default::default()
             },
         );
 
         let mut c_predator_of = HashSet::default();
-        c_predator_of.insert(CreatureType(0));
+        c_predator_of.insert(CreatureType(1));
         initial_factors.insert(
-            CreatureType(2),
+            CreatureType(3),
             Factors {
-                color: Color::WHITE,
+                color: Color::from(bevy::color::palettes::css::WHITE),
                 speed: 64.0,
                 vision: 25.0,
                 size: 2.0,
@@ -795,7 +789,6 @@ impl Default for BoidsPlugin {
                 chase: 10.0,
                 max_energy: 50.0,
                 predator_of: c_predator_of,
-                ..Default::default()
             },
         );
 
@@ -805,22 +798,21 @@ impl Default for BoidsPlugin {
 
 impl Plugin for BoidsPlugin {
     fn build(&self, app: &mut App) {
-        // Insert Resources
         app.insert_resource(FactorInfo {
             factors: self.initial_factors.clone(),
         })
         .insert_resource(Features::default())
         .insert_resource(HashGrid::default())
-        .insert_resource(CreatureType::default())
+        .insert_resource(CreatureType(1))
         .insert_resource(DespawnProperties::default())
         .insert_resource(SpawnProperties::default())
-        .insert_resource(FixedTime::new_from_secs(1.0 / 30.0))
-        .add_event::<ApplyForceEvent>()
-        .add_event::<EnergyChangeEvent>()
-        .add_state::<SimState>()
-        .add_plugin(UiPlugin::default())
-        .add_startup_system(setup_creatures)
+        .insert_resource(Time::<Fixed>::from_hz(30.0))
+        .add_message::<ApplyForceEvent>()
+        .add_message::<EnergyChangeEvent>()
+        .init_state::<SimState>()
+        .add_systems(Startup, setup_creatures)
         .configure_sets(
+            Update,
             (
                 SystemStages::Spawn,
                 SystemStages::Calculate,
@@ -830,28 +822,31 @@ impl Plugin for BoidsPlugin {
             )
                 .chain(),
         )
-        .add_systems((update_factors_system, pause_system))
+        .add_systems(Update, (update_factors_system, pause_system))
         .add_systems(
+            Update,
             (despawn_system, spawn_system, kill_system)
                 .in_set(SystemStages::Spawn)
-                .in_set(OnUpdate(SimState::Running)),
+                .run_if(in_state(SimState::Running)),
         )
         .add_systems(
+            FixedUpdate,
             (flocking_system, energy_drain_system)
                 .in_set(SystemStages::Calculate)
-                .in_set(OnUpdate(SimState::Running))
-                .in_schedule(CoreSchedule::FixedUpdate),
+                .run_if(in_state(SimState::Running)),
         )
         .add_systems(
+            Update,
             (apply_forces_system, apply_energy_change_system)
                 .in_set(SystemStages::Apply)
-                .in_set(OnUpdate(SimState::Running)),
+                .run_if(in_state(SimState::Running)),
         )
         .add_systems(
+            Update,
             (move_system, wrap_borders_system)
                 .in_set(SystemStages::Act)
-                .in_set(OnUpdate(SimState::Running)),
+                .run_if(in_state(SimState::Running)),
         )
-        .add_system(hash_grid_update_system.in_set(SystemStages::Cache));
+        .add_systems(Update, hash_grid_update_system.in_set(SystemStages::Cache));
     }
 }
