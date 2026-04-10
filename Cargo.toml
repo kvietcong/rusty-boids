@@ -4,6 +4,9 @@ version = "0.0.1"
 edition = "2021"
 
 [dependencies]
-bevy = "0.10"
+bevy = "0.18"
 rand = "0.8"
-bevy_egui = "0.20"
+bevy_egui = "0.39"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

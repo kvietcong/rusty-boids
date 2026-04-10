@@ -11,7 +11,7 @@
         wasm_bindgen("./rusty-boids_bg.wasm") // Initiate Simulation
 
         const afterSimAppears = () => {
-            const container = document.getElementsByTagName("main")[0];
+            const container = document.getElementById("sim-container");
 
             const description = document.createElement("p");
             description.innerHTML = `
@@ -34,13 +34,15 @@
 
                 The sim doesn't work when out of focus. Refresh the page if you did go out of focus.
             `;
-            container.appendChild(description);
+            // Insert description before the container
+            document.querySelector("main").insertBefore(description, container);
 
             const simulation = document.getElementsByTagName("canvas")[0];
             simulation.focus();
             simulation.addEventListener("wheel", event =>
                 window.scrollBy({top: event.deltaY, left: event.deltaX, behavior: "auto"}));
-            document.body.removeChild(simulation);
+            
+            // Move canvas into the container
             container.appendChild(simulation);
         };
 
@@ -66,7 +68,8 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            /* justify-content: center; */
+            width: 100%;
+            min-height: 100vh;
         }
 
         h1 {
@@ -80,12 +83,24 @@
             padding: 10px 0 30px 0;
         }
 
-        canvas {
+        #sim-container {
+            width: 90vw;
+            height: 70vh;
+            max-width: 1600px;
+            max-height: 900px;
             border: 1px solid white;
-            padding: 1px;
             border-radius: 10px;
-            margin: auto;
             margin-bottom: 50px;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        canvas {
+            width: 100% !important;
+            height: 100% !important;
+            display: block;
         }
     </style>
 </head>
@@ -93,6 +108,7 @@
 <body>
     <main>
         <h1>Welcome to KV Le's Boids (Flocking) Simulation</h1>
+        <div id="sim-container"></div>
     </main>
 </body>
 
